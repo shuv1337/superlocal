@@ -19,9 +19,9 @@
     "connect": "bun run scripts/connect.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "test": "bun test tests/provider.test.ts tests/api.test.ts",
+    "test": "bun test tests/provider.test.ts tests/api.test.ts tests/microsoft-oauth.test.ts",
     "test:provider": "bun test tests/provider.test.ts",
-    "test:api": "bun test tests/api.test.ts"
+    "test:api": "bun test tests/api.test.ts tests/microsoft-oauth.test.ts"
   },
   "dependencies": {
     "effect": "3.22.1",

@@ -20,6 +20,7 @@ export interface LocalConfig {
     mock: { enabled: boolean }
     gmail: { enabled: boolean; oauth: { clientId: SecretSource; clientSecret: SecretSource; scopes: string[] } }
     inbound: { enabled: boolean }
+    outlook: { enabled: boolean; tenant: string; oauth: { clientId: SecretSource; clientSecret: SecretSource; scopes: string[] } }
   }
 }
 
@@ -119,6 +120,10 @@ function defaults() {
         scopes: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/gmail.send'],
       } },
       inbound: { enabled: false },
+      outlook: { enabled: false, tenant: 'common', oauth: {
+        clientId: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' }, clientSecret: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_SECRET' },
+        scopes: ['openid', 'profile', 'email', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Mail.Send'],
+      } },
     },
   }
 }
@@ -144,14 +149,29 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
   const backend = record(input.backend, 'backend', ['port'])
   const auth = record(input.auth, 'auth', ['method', 'sessionHours'])
   const writes = record(input.allowProviderWrites, 'allowProviderWrites', ['mock', 'real'])
-  const providers = record(input.providers, 'providers', ['mock', 'gmail', 'inbound'])
+  const providers = record(input.providers, 'providers', ['mock', 'gmail', 'inbound', 'outlook'])
   const mock = record(providers.mock, 'providers.mock', ['enabled'])
   const gmail = record(providers.gmail, 'providers.gmail', ['enabled', 'oauth'])
   const inbound = record(providers.inbound, 'providers.inbound', ['enabled'])
+  const outlook = providers.outlook === undefined ? undefined : record(providers.outlook, 'providers.outlook', ['enabled', 'tenant', 'oauth'])
   const oauth = record(gmail.oauth, 'providers.gmail.oauth', ['clientId', 'clientSecret', 'scopes'])
+  const outlookOauth = outlook === undefined ? undefined : record(outlook.oauth, 'providers.outlook.oauth', ['clientId', 'clientSecret', 'scopes'])
   if (auth.method !== 'loopback' || typeof auth.sessionHours !== 'number' || !Number.isInteger(auth.sessionHours) || auth.sessionHours < 1 || auth.sessionHours > 24) invalid('auth (loopback, 1–24 sessionHours)')
   if (!Array.isArray(oauth.scopes) || oauth.scopes.length > 64 || oauth.scopes.some(scope => typeof scope !== 'string' || !/^[\x21\x23-\x5b\x5d-\x7e]{1,2048}$/.test(scope)) ||
     !oauth.scopes.includes('openid') || !oauth.scopes.includes('email') || oauth.scopes.join(' ').length > 8192) invalid('providers.gmail.oauth.scopes')
+  const outlookTenant = typeof environment.SUPERLOCAL_MICROSOFT_TENANT === 'string' ? environment.SUPERLOCAL_MICROSOFT_TENANT
+    : outlook === undefined ? 'common' : outlook.tenant === undefined ? 'common' : outlook.tenant
+  if (typeof outlookTenant !== 'string' || !/^(?:common|organizations|consumers|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(outlookTenant)) {
+    invalid('providers.outlook.tenant')
+  }
+  const outlookScopes = outlookOauth === undefined
+    ? ['openid', 'profile', 'email', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Mail.Send']
+    : outlookOauth.scopes
+  if (!Array.isArray(outlookScopes) || outlookScopes.length > 64 || outlookScopes.some(scope => typeof scope !== 'string' || !/^[\x21\x23-\x5b\x5d-\x7e]{1,2048}$/.test(scope)) ||
+    !outlookScopes.includes('openid') || !outlookScopes.includes('User.Read') || !outlookScopes.includes('offline_access') ||
+    !outlookScopes.some(scope => scope === 'Mail.Read' || scope === 'Mail.ReadWrite') || outlookScopes.join(' ').length > 8192) {
+    invalid('providers.outlook.oauth.scopes')
+  }
   if (!Array.isArray(web.allowedOrigins) || web.allowedOrigins.length > 16) invalid('web.allowedOrigins')
   const webPort = port(environment.SUPERLOCAL_WEB_PORT ?? web.port, 'web.port')
   const apiPort = port(environment.SUPERLOCAL_API_PORT ?? backend.port, 'backend.port')
@@ -170,6 +190,14 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
     providers: { mock: { enabled: enabledMock }, inbound: { enabled: bool(inbound.enabled, 'providers.inbound.enabled') }, gmail: {
       enabled: bool(gmail.enabled, 'providers.gmail.enabled'), oauth: {
         clientId: secretSource(oauth.clientId, 'providers.gmail.oauth.clientId'), clientSecret: secretSource(oauth.clientSecret, 'providers.gmail.oauth.clientSecret'), scopes: oauth.scopes as string[],
+      },
+    }, outlook: {
+      enabled: outlook === undefined ? false : bool(outlook.enabled, 'providers.outlook.enabled'),
+      tenant: outlookTenant.toLowerCase(),
+      oauth: {
+        clientId: secretSource(outlookOauth === undefined ? { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' } : outlookOauth.clientId, 'providers.outlook.oauth.clientId'),
+        clientSecret: secretSource(outlookOauth === undefined ? { env: 'SUPERLOCAL_MICROSOFT_CLIENT_SECRET' } : outlookOauth.clientSecret, 'providers.outlook.oauth.clientSecret'),
+        scopes: outlookScopes as string[],
       },
     } },
   }

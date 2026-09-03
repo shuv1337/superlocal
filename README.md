@@ -51,6 +51,7 @@ The goal is **ready-to-connect providers out of the box**: choose a service, com
 | --- | --- | --- |
 | Mock mailboxes | Included and offline | Keep the full app usable immediately, without personal credentials. |
 | Gmail | Implemented; host OAuth client configuration required | Make authorization, reconnects, and multi-account setup simpler. |
+| Microsoft 365 / Exchange Online | Implemented; host Entra (Azure AD) OAuth client configuration required | Same host-managed sign-in as Gmail, against Microsoft Graph. |
 | [Inbound.new](https://inbound.new) | Implemented; API-key onboarding and domain/address views | Improve large-domain onboarding, import progress, and recovery within the provider's sync limits. |
 | iCloud / IMAP | In progress | Email + app-specific-password setup for iCloud, secure IMAP/SMTP presets, and end-to-end provider qualification. |
 | [Resend](https://resend.com/docs/dashboard/receiving/introduction) | Planned | Add a sending/receiving adapter using received-email APIs, attachment retrieval, and verified webhook ingestion. |
@@ -84,17 +85,18 @@ The SDK currently runs on Bun and SQLite. The included host is local-only; publi
 
 ## Connect real providers
 
-The current Gmail and Inbound connectors use the local host configuration:
+The current Gmail, Microsoft 365, and Inbound connectors use the local host configuration:
 
 1. Stop the app and open the generated, git-ignored `superlocal.local.json`.
-2. Set `mode` to `real` and enable `providers.gmail.enabled` and/or `providers.inbound.enabled`.
+2. Set `mode` to `real` and enable `providers.gmail.enabled`, `providers.outlook.enabled`, and/or `providers.inbound.enabled`.
 3. For Gmail, configure the host's Google OAuth web client. Register **`http://localhost:5178/v1/oauth/google/callback`** for the default local setup. Google does not accept `.local` redirect domains; use the configured localhost origin for local authorization.
-4. Restart the app and open **Settings → Add Accounts**. Inbound takes an API key, then offers discovered mailboxes. Gmail uses the host-managed OAuth flow.
-5. Use **Settings → Mailboxes** to choose unified inclusion and pinned shortcuts.
+4. For Microsoft 365 / Exchange Online, register an Entra ID (Azure AD) web app. Delegated Graph permissions: **`User.Read`**, **`Mail.ReadWrite`**, **`Mail.Send`**, plus **`openid`**, **`profile`**, **`email`**, and **`offline_access`**. Register **`http://localhost:5178/v1/oauth/outlook/callback`** as a web redirect URI. Use `providers.outlook.tenant` `common` (any work/school or personal account), `organizations` (work/school only), `consumers` (personal only), or a specific tenant ID.
+5. Restart the app and open **Settings → Add Accounts**. Inbound takes an API key, then offers discovered mailboxes. Gmail and Microsoft 365 use the host-managed OAuth flow.
+6. Use **Settings → Mailboxes** to choose unified inclusion and pinned shortcuts.
 
-Provider credentials are submitted to the host, encrypted per connection by the SDK, and not returned by the mail APIs. Mock and real modes stay separate. The Gmail OAuth defaults reference `SUPERLOCAL_GOOGLE_CLIENT_ID` and `SUPERLOCAL_GOOGLE_CLIENT_SECRET`; export them explicitly, or configure the corresponding `providers.gmail.oauth` values as private strings or `{ "env": "YOUR_VARIABLE_NAME" }` references. No SDK `.env` file or unrelated ambient credentials are imported.
+Provider credentials are submitted to the host, encrypted per connection by the SDK, and not returned by the mail APIs. Mock and real modes stay separate. The Gmail OAuth defaults reference `SUPERLOCAL_GOOGLE_CLIENT_ID` and `SUPERLOCAL_GOOGLE_CLIENT_SECRET`; Microsoft 365 defaults reference `SUPERLOCAL_MICROSOFT_CLIENT_ID`, `SUPERLOCAL_MICROSOFT_CLIENT_SECRET`, and optional `SUPERLOCAL_MICROSOFT_TENANT`. Export them explicitly, or configure the corresponding `providers.gmail.oauth` / `providers.outlook.oauth` values as private strings or `{ "env": "YOUR_VARIABLE_NAME" }` references. No SDK `.env` file or unrelated ambient credentials are imported.
 
-Real connections default to normal mail access (`allowProviderWrites.real: true`). For an optional read-only host, set it to `false`; Gmail can use `https://www.googleapis.com/auth/gmail.readonly` with `openid` and `email` rather than modify/send scopes. Reauthorize old read-only grants before sending or modifying mail. Provider capabilities and OAuth permissions still determine which native actions are available.
+Real connections default to normal mail access (`allowProviderWrites.real: true`). For an optional read-only host, set it to `false`; Gmail can use `https://www.googleapis.com/auth/gmail.readonly` with `openid` and `email` rather than modify/send scopes, and Microsoft 365 can use `Mail.Read` rather than `Mail.ReadWrite` and `Mail.Send`. Reauthorize old read-only grants before sending or modifying mail. Provider capabilities and OAuth permissions still determine which native actions are available.
 
 <details>
 <summary>Runtime storage and advanced local configuration</summary>

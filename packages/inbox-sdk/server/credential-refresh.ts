@@ -1,5 +1,6 @@
 import { CredentialError, type CredentialContext, type ProviderDefinition } from '../src/contracts'
 import type { GoogleOAuthConfig } from './google-oauth'
+import { microsoftIssuerTenant, type MicrosoftOAuthConfig } from './microsoft-oauth'
 import { ProviderError, providerJson } from './sdk/types'
 
 export async function refreshOAuthCredentials(
@@ -91,4 +92,52 @@ export async function verifyGoogleCredentials(
   return !!userInfo && typeof userInfo.sub === 'string' && userInfo.sub.length > 0 && userInfo.sub.length <= 255 &&
     userInfo.sub === identity.subject && typeof userInfo.email === 'string' && userInfo.email.length <= 320 &&
     /^[^@\s]+@[^@\s]+$/.test(userInfo.email) && !/[\x00-\x1f\x7f]/.test(userInfo.email) && userInfo.email_verified === true
+}
+
+export function createMicrosoftCredentialRefresh(
+  config: MicrosoftOAuthConfig | undefined,
+  fetcher?: typeof fetch,
+  now: () => number = Date.now,
+): ProviderDefinition['refresh'] {
+  return async (credentials, signal, context) => {
+    const identity = context?.connection.identity
+    if (context && context.connection.providerId !== 'outlook') {
+      throw new CredentialError('unavailable', 'Microsoft credential refresh requires an Outlook connection.')
+    }
+    const tenantId = identity ? microsoftIssuerTenant(identity.issuer) : undefined
+    if (identity && (!config?.clientId || !config.clientSecret || !tenantId || identity.registrationId !== config.clientId)) {
+      throw new CredentialError('unavailable', 'The Microsoft client registration for this connection is unavailable.')
+    }
+    return refreshOAuthCredentials('outlook', { ...credentials,
+      ...(identity ? { clientId: config!.clientId, clientSecret: config!.clientSecret, tenantId } : {}),
+      ...(fetcher ? { fetch: fetcher } : {}),
+    }, signal, now)
+  }
+}
+
+export async function verifyMicrosoftCredentials(
+  context: CredentialContext,
+  config: MicrosoftOAuthConfig | undefined,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<boolean> {
+  const { connection, credentials, signal } = context
+  const identity = connection.identity
+  if (connection.providerId !== 'outlook' || !identity) return false
+  const tenantId = microsoftIssuerTenant(identity.issuer)
+  if (!config?.clientId || !config.clientSecret || !tenantId || identity.registrationId !== config.clientId) {
+    throw new CredentialError('unavailable', 'The Microsoft client registration for this connection is unavailable.')
+  }
+  if (typeof credentials.accessToken !== 'string' || !credentials.accessToken || credentials.accessToken.length > 16_384 ||
+    credentials.accessToken.trim() !== credentials.accessToken || /[\x00-\x1f\x7f]/.test(credentials.accessToken)) {
+    throw new CredentialError('unavailable', 'Microsoft identity verification requires an access token.')
+  }
+  const profile = await providerJson<{ id?: unknown; mail?: unknown; userPrincipalName?: unknown }>('outlook', fetcher,
+    'https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName', {
+      method: 'GET', signal, redirect: 'error', cache: 'no-store', headers: { Authorization: `Bearer ${credentials.accessToken}` },
+    })
+  const email = typeof profile?.mail === 'string' && profile.mail ? profile.mail
+    : typeof profile?.userPrincipalName === 'string' ? profile.userPrincipalName : ''
+  return !!profile && typeof profile.id === 'string' && profile.id.length > 0 && profile.id.length <= 36 &&
+    profile.id.toLowerCase() === identity.subject && typeof email === 'string' && email.length <= 320 &&
+    /^[^@\s]+@[^@\s]+$/.test(email) && !/[\x00-\x1f\x7f]/.test(email)
 }

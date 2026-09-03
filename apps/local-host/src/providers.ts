@@ -1,9 +1,11 @@
 import { InboxError, type Inbox, type ProviderDefinition } from 'inbox-sdk'
 import type { InboxApiOptions } from 'inbox-sdk/http'
 import { builtInProviders } from 'inbox-sdk/providers'
-import { createGoogleCredentialRefresh, verifyGoogleCredentials } from '../../../packages/inbox-sdk/server/credential-refresh'
+import { createGoogleCredentialRefresh, createMicrosoftCredentialRefresh, verifyGoogleCredentials, verifyMicrosoftCredentials } from '../../../packages/inbox-sdk/server/credential-refresh'
 import { createGoogleOAuthApi } from '../../../packages/inbox-sdk/server/google-oauth-api'
 import { createGoogleOAuthHost, type GoogleOAuthConfig } from '../../../packages/inbox-sdk/server/google-oauth'
+import { createMicrosoftOAuthApi } from '../../../packages/inbox-sdk/server/microsoft-oauth-api'
+import { createMicrosoftOAuthHost, type MicrosoftOAuthConfig } from '../../../packages/inbox-sdk/server/microsoft-oauth'
 import { resolveSecret, type LocalConfig } from './config'
 import type { openLocalRuntime } from './runtime'
 
@@ -41,6 +43,7 @@ function builtIn(id: string, baseUrl: string): ProviderDefinition {
 export function createRealRegistrations(config: LocalConfig, runtime: ReturnType<typeof openLocalRuntime>, environment: NodeJS.ProcessEnv) {
   const registrations: HostProviderRegistration[] = []
   let googleConfig: GoogleOAuthConfig | undefined
+  let microsoftConfig: MicrosoftOAuthConfig | undefined
   if (config.providers.gmail.enabled) {
     const clientId = resolveSecret(config.providers.gmail.oauth.clientId, environment)
     const clientSecret = resolveSecret(config.providers.gmail.oauth.clientSecret, environment)
@@ -84,6 +87,48 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
       },
     })
   }
+  if (config.providers.outlook.enabled) {
+    const clientId = resolveSecret(config.providers.outlook.oauth.clientId, environment)
+    const clientSecret = resolveSecret(config.providers.outlook.oauth.clientSecret, environment)
+    if (clientId && clientSecret) microsoftConfig = { clientId, clientSecret, tenant: config.providers.outlook.tenant, scopes: config.providers.outlook.oauth.scopes,
+      redirectUri: `${config.web.origin}/v1/oauth/outlook/callback` }
+    let coordinator: ReturnType<typeof createMicrosoftOAuthHost> | undefined
+    const oauth = (inbox: Inbox) => {
+      if (!microsoftConfig) throw new InboxError('HOST_PROVIDER_NOT_READY', 'Configure the Microsoft OAuth client in superlocal.local.json or its explicitly named environment variables, then restart.', 409)
+      return coordinator ??= createMicrosoftOAuthHost({ inbox, database: runtime.database, encryptionKey: runtime.encryptionKey, config: microsoftConfig })
+    }
+    registrations.push({
+      definition: { ...builtIn('outlook', 'https://graph.microsoft.com/v1.0'), scopes: config.providers.outlook.oauth.scopes, refresh: createMicrosoftCredentialRefresh(microsoftConfig) },
+      onboarding: { id: 'outlook', name: 'Microsoft 365', connection: 'oauth', enabled: true, ready: !!microsoftConfig, actionLabel: 'Sign in with Microsoft',
+        ...(!microsoftConfig ? { setupMessage: 'Set providers.outlook.oauth.clientId and clientSecret in superlocal.local.json (or their explicit environment references), register web.origin + /v1/oauth/outlook/callback with Microsoft Entra, then restart.' } : {}) },
+      async connect(inbox, owner, _credentials, origin) {
+        if (origin !== config.web.origin) throw new InboxError('HOST_OAUTH_ORIGIN_REQUIRED', 'Open the configured web.origin before starting OAuth so its session and callback stay on the same origin.', 409)
+        const attempt = await oauth(inbox).start(owner)
+        if (!attempt.authorizeUrl) throw new InboxError('HOST_OAUTH_UNAVAILABLE', 'OAuth could not be started.', 503)
+        const url = new URL(attempt.authorizeUrl)
+        if (url.origin !== config.web.origin) throw new InboxError('HOST_OAUTH_UNAVAILABLE', 'OAuth origin does not match the local web origin.', 503)
+        return { authorizeUrl: `${url.pathname}${url.search}` }
+      },
+      mount(inbox, authenticate) {
+        const api = createMicrosoftOAuthApi({ oauth: () => oauth(inbox), authenticate, allowedOrigins: config.web.allowedOrigins })
+        const callbackPath = '/v1/oauth/outlook/callback'
+        return {
+          matches: path => path.startsWith('/v1/oauth/outlook/'), callbackPath,
+          async fetch(request) {
+            const incoming = new URL(request.url)
+            const canonical = new Request(new URL(`${incoming.pathname}${incoming.search}`, config.web.origin), request)
+            const response = await api.fetch(canonical)
+            if (incoming.pathname !== callbackPath || request.method !== 'GET') return response
+            const headers = new Headers(response.headers)
+            headers.delete('Content-Type')
+            headers.delete('Content-Length')
+            headers.set('Location', `${config.web.origin}/?connection=${response.ok ? 'connected' : 'failed'}`)
+            return new Response(null, { status: 303, headers })
+          },
+        }
+      },
+    })
+  }
   if (config.providers.inbound.enabled) registrations.push({
     definition: builtIn('inbound', 'https://inbound.new/api/e2'),
     onboarding: { id: 'inbound', name: 'Inbound', connection: 'credentials', enabled: true, ready: true, actionLabel: 'Connect Inbound',
@@ -93,5 +138,9 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
       return { connectionId: connection.id }
     },
   })
-  return { registrations, verifyCredentials: (context: Parameters<typeof verifyGoogleCredentials>[0]) => verifyGoogleCredentials(context, googleConfig) }
+  return { registrations, verifyCredentials: async (context: Parameters<typeof verifyGoogleCredentials>[0]) => {
+    if (context.connection.providerId === 'gmail') return verifyGoogleCredentials(context, googleConfig)
+    if (context.connection.providerId === 'outlook') return verifyMicrosoftCredentials(context, microsoftConfig)
+    return false
+  } }
 }
