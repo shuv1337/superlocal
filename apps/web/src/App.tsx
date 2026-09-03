@@ -1,5 +1,6 @@
 import {
   useDeferredValue,
+  useCallback,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -37,13 +38,19 @@ import "./inbox.css";
 import FolderNavigation from "./FolderNavigation";
 import MailRows from "./MailRows";
 import RecentOpens from "./RecentOpens";
-import { selectMailView } from "./mail-view";
+import { selectMailView, mailWindow } from "./mail-view";
 import { UNIFIED_ACCOUNT } from "./mail-model";
 import { plainText } from "./mail-text";
 import { resolveMailShortcut } from "./mail-shortcuts";
 import MailCommandDialog, { type CommandItem } from "./MailCommandDialog";
 import IssueReporter from "./IssueReporter";
+import Notices, { Notice } from "./Notices";
+import { InboxActionError, type InboxIssue } from "./inbox";
+import { measureAction } from "./browser-logs";
 import { captureIssueReport, type IssueReport } from "./issue-reports";
+import SenderContext from "./SenderContext";
+import { senderContact, senderConversations } from "./sender-context";
+import { normalizeSplits, attentionSplit, type SplitPreferences } from "../../shared/splits";
 
 type Route = {
   account: string;
@@ -96,10 +103,11 @@ export default function App() {
   const [route, setRoute] = useState<Route>(readRoute);
   const inbox = useInbox();
   const { store, mail, drafts } = inbox;
-  const [preferences, setPreferences] = useState<Preferences>(() => ({
-    ...defaultPreferences,
-    ...loadSaved("preferences", {}),
-  }));
+  const [preferences, setPreferences] = useState<Preferences>(() => {
+    const saved = loadSaved<Record<string, unknown>>("preferences", {});
+    const { version: _version, ...splits } = normalizeSplits({ ...saved, version: undefined });
+    return { ...defaultPreferences, ...saved, ...splits };
+  });
   const [navigation, setNavigation] = useState(false);
   const [settings, setSettings] = useState(false);
   const [settingsPage, setSettingsPage] = useState<string>();
@@ -154,15 +162,28 @@ export default function App() {
   } | null>(null);
   const [noticeFading, setNoticeFading] = useState(false);
   const [noticeHovered, setNoticeHovered] = useState(false);
+  // The read-only host reminder shows once per tab; the disabled controls and Add Accounts keep the state visible afterwards.
+  const [readOnlyDismissed, setReadOnlyDismissed] = useState(() => { try { return sessionStorage.getItem("superlocal:read-only-notice") === "dismissed"; } catch { return false; } });
+  const [onboardingReturn, setOnboardingReturn] = useState<{ providerId: string; connectionId: string | null } | null>(null);
   useEffect(() => {
     const url = new URL(location.href);
     const connection = url.searchParams.get("connection");
     if (connection !== "connected" && connection !== "failed") return;
-    setNotice({ text: connection === "connected" ? "Account connected." : "Account connection could not be completed. Try again in Add Accounts." });
-    url.searchParams.delete("connection");
+    const providerId = url.searchParams.get("provider") || "gmail";
+    const connectionId = url.searchParams.get("connectionId");
+    for (const key of ["connection", "provider", "connectionId"]) url.searchParams.delete(key);
     history.replaceState(null, "", url);
+    if (connection === "connected") {
+      // Resume onboarding in Add Accounts so the user sees connecting → connected, then lands back in the inbox.
+      setOnboardingReturn({ providerId, connectionId: /^[A-Za-z0-9_-]{1,128}$/.test(connectionId ?? "") ? connectionId : null });
+      setSettingsPage("Add Accounts");
+      setSettings(true);
+      setMobileSidebar(true);
+    } else {
+      setNotice({ text: "Account connection could not be completed. Try again in Add Accounts." });
+    }
   }, []);
-  const [profile, setProfile] = useState(false);
+  const [senderSelection, setSenderSelection] = useState<{ threadId: string; messageId: string } | null>(null);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [userProfile, setUserProfile] = useState(() =>
     loadSaved("profile", {
@@ -195,7 +216,9 @@ export default function App() {
     [mail, route.account],
   );
   const searchKey = `${route.account}\0${resultQuery}`;
-  const searchVersion = accountMail.map(mail => `${mail.id}:${mail.folder}:${mail.unread}:${mail.starred}:${mail.labels.join(",")}:${mail.reminder ?? ""}:${mail.messages.map(message => message.revision).join(",")}`).join("|");
+  const searchVersion = useMemo(() => search && searchSubmitted
+    ? accountMail.map(mail => `${mail.id}:${mail.folder}:${mail.unread}:${mail.starred}:${mail.labels.join(",")}:${mail.reminder ?? ""}:${mail.messages.map(message => message.revision).join(",")}`).join("|")
+    : "", [accountMail, search, searchSubmitted]);
   const serverMatches = useMemo(() => searchSubmitted ? searchResult?.key === searchKey ? searchResult.ids : new Set<string>() : undefined, [searchSubmitted, searchResult, searchKey]);
   useEffect(() => {
     if (!search || !searchSubmitted || !route.account || !resultQuery.trim()) return;
@@ -266,7 +289,13 @@ export default function App() {
     [drafts, route.account, isUnified, unifiedMailboxIds],
   );
   const isDrafts = route.folder === "Drafts" && !search;
-  const currentMail = accountMail.find((m) => m.id === route.thread);
+  const currentMail = useMemo(() => route.thread ? accountMail.find((m) => m.id === route.thread) : undefined, [accountMail, route.thread]);
+  const getSenderConversations = useCallback((keys: readonly string[]) => senderConversations(accountMail, keys), [accountMail]);
+  const contextContact = useMemo(() => currentMail && !currentMail.operationId
+    ? senderContact(currentMail, inbox.senderHistory, inbox.accounts, senderSelection?.threadId === currentMail.id ? senderSelection.messageId : undefined)
+    : null, [currentMail, inbox.senderHistory, inbox.accounts, senderSelection]);
+  const contextMailboxIds = useMemo(() => isUnified ? unifiedMailboxIds : [route.account], [isUnified, unifiedMailboxIds, route.account]);
+  const contextSender = currentMail && contextContact ? store.defaultMailbox(route.account, currentMail, contextContact.messageId ?? undefined) : undefined;
   // A reply keeps its thread association when the user changes its From account.
   const currentDraft =
     drafts.find((d) => d.id === route.draft) ||
@@ -282,7 +311,12 @@ export default function App() {
       `${preferences.density}:${displayedRows.map((item) => item.id).join("|")}`,
     [preferences.density, displayedRows],
   );
-  const targetIds =
+  const getMailWindow = useCallback((top: number, height: number, windowed: boolean) => {
+    const range = windowed ? mailWindow(entries, top, height, rowHeight) : { start: 0, end: entries.length };
+    return { ...range, entries: entries.slice(range.start, range.end) };
+  }, [entries, rowHeight]);
+  const getHighlightedMail = useCallback((index: number) => entries.find(entry => !entry.group && entry.index === index), [entries]);
+  const targetIds = useMemo(() =>
     commandMode && commandMode !== "accounts" && overlayIds
       ? overlayIds
       : selected.length
@@ -291,8 +325,11 @@ export default function App() {
           ? [currentMail.id]
           : visibleMail[highlight]
             ? [visibleMail[highlight].id]
-            : [];
-  const targets = mail.filter((m) => targetIds.includes(m.id));
+            : [], [commandMode, overlayIds, selected, currentMail, visibleMail, highlight]);
+  const targets = useMemo(() => {
+    const ids = new Set(targetIds);
+    return ids.size ? mail.filter((message) => ids.has(message.id)) : [];
+  }, [mail, targetIds]);
   const dark =
     !["Light", "light"].includes(preferences.theme) &&
     (!["System", "Match System"].includes(preferences.theme) || systemDark);
@@ -316,6 +353,16 @@ export default function App() {
   usePersistence("preferences", preferences, storageFailure);
   usePersistence("searches", searchHistory, storageFailure);
   usePersistence("profile", userProfile, storageFailure);
+  useLayoutEffect(() => {
+    const saved = inbox.splitPreferences;
+    if (!saved) return;
+    const { version: _version, revision: _revision, ...values } = saved;
+    setPreferences(previous => Object.entries(values).every(([key, value]) => JSON.stringify(previous[key]) === JSON.stringify(value)) ? previous : { ...previous, ...values });
+    if (!saved.splits.includes(route.split)) {
+      const original = attentionSplit({ splitRules: (preferences.splitRules as Record<string, string>) || {}, splitAliases: (preferences.splitAliases as Record<string, string>) || {} }, route.split);
+      navigate({ split: saved.splits.find(name => original && attentionSplit(saved, name) === original) || saved.splits[0] || "Important" });
+    }
+  }, [inbox.splitPreferences, route.split]);
   useEffect(() => {
     if (!inbox.policy) return;
     const sendDelay = inbox.policy.undoSendSeconds ? `${inbox.policy.undoSendSeconds} seconds` : "No delay";
@@ -332,7 +379,7 @@ export default function App() {
   useEffect(() => {
     if (!currentMail || currentMail.operationId) return;
     void store.loadThread(currentMail.id).catch(() => {});
-  }, [store, currentMail?.id, currentMail?.messages.map(message => `${message.id}:${message.revision}`).join(","), inbox.policy?.remoteImages]);
+  }, [store, currentMail?.id, currentMail?.messages.map(message => `${message.id}:${message.bodyRevision ?? message.revision}:${!!message.loaded}`).join(","), inbox.policy?.remoteImages]);
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     document.documentElement.dataset.style =
@@ -419,7 +466,7 @@ export default function App() {
     history.pushState(null, "", `#/${params}`);
     setRoute(next);
     closeNavigation();
-    setProfile(false);
+    setSenderSelection(null);
     setMobileSidebar(false);
   }
   function closeNavigation() {
@@ -474,15 +521,15 @@ export default function App() {
     closeNavigation();
   }
   function updatePreferences(patch: Partial<Preferences>) {
-    const { sendDelay, showImages, ...local } = patch;
+    const { sendDelay, showImages, splits, inactiveSplits, splitRules, splitAliases, ...local } = patch;
     setPreferences((p) => ({ ...p, ...local }));
+    const splitPatch = Object.fromEntries(Object.entries({ splits, inactiveSplits, splitRules, splitAliases }).filter(([, value]) => value !== undefined));
+    if (Object.keys(splitPatch).length) void store.setSplitPreferences(splitPatch as Partial<Omit<SplitPreferences, "version">>).catch(actionError);
     if (typeof sendDelay === "string") {
       const seconds = Number.parseInt(sendDelay, 10) || 0;
       void store.setPolicy({ undoSendSeconds: Math.min(120, seconds) }).catch(actionError);
     }
     if (typeof showImages === "boolean") void store.setPolicy({ remoteImages: showImages }).catch(actionError);
-    if (patch.splits && !patch.splits.includes(route.split))
-      navigate({ split: patch.splits[0] || "Other" });
     if (typeof patch.profileName === "string")
       setUserProfile((p) => ({ ...p, name: patch.profileName as string }));
     if (typeof patch.profileLocation === "string")
@@ -492,10 +539,60 @@ export default function App() {
       }));
   }
   function actionError(error: unknown) {
+    if (error instanceof InboxActionError) return;
     setNotice({ text: error instanceof Error ? error.message : "The inbox action failed. Your data has not been replaced with simulated state." });
   }
+  // Retry for background problems only rereads: refresh the snapshot, reconnect live updates, reload the open conversation.
+  function retryIssue(issue: InboxIssue) {
+    void store.retry();
+    if (issue.scope === "thread" && currentMail && !currentMail.operationId) void store.loadThread(currentMail.id).catch(() => {});
+  }
+  function dismissReadOnly() {
+    setReadOnlyDismissed(true);
+    try { sessionStorage.setItem("superlocal:read-only-notice", "dismissed"); } catch { /* The reminder simply returns next load. */ }
+  }
+  const notices = (
+    <Notices issues={inbox.issues} onRetry={retryIssue} onDismiss={store.dismissIssue}>
+      {inbox.host && !inbox.host.allowProviderWrites && !readOnlyDismissed && (
+        <div role="status">
+          <Notice quiet title="Read-only host" detail="Sending and provider changes are disabled." action={{ label: "Accounts", onClick: () => openSettings("Add Accounts") }} onDismiss={dismissReadOnly} data={{ scope: "read-only" }} />
+        </div>
+      )}
+      {notice && (
+        <div
+          className={`toast ${noticeFading ? "is-fading" : ""}`}
+          role="status"
+          onMouseEnter={() => setNoticeHovered(true)}
+          onMouseLeave={() => setNoticeHovered(false)}
+        >
+          <span className="toast-status">{notice.text}</span>
+          {notice.undo && (
+            <button
+              className="toast-undo"
+              onClick={() => {
+                notice.undo?.();
+                setNotice(null);
+              }}
+            >
+              Undo
+            </button>
+          )}
+          <IconButton
+            name="Notification-closeIcon"
+            title="Dismiss notification"
+            size={10}
+            className="toast-close"
+            onClick={() => setNotice(null)}
+          />
+        </div>
+      )}
+    </Notices>
+  );
   function undoAction(reverse: () => Promise<void>) {
-    return () => { void reverse().catch(actionError); };
+    return () => {
+      const timing = measureAction("undo");
+      void reverse().then(() => { timing.accepted(); timing.finish(); }, error => { actionError(error); timing.finish("error"); });
+    };
   }
   async function reportIssue() {
     if (issueCapturePending.current) return;
@@ -556,19 +653,23 @@ export default function App() {
     }
   }
   function changeSearchQuery(value: string, submit = false) {
+    const timing = measureAction("search");
     motion.prepare(submit ? "return" : "search");
     setQuery(value);
     setSearchSubmitted(submit);
     setHighlight(0);
     if (submit) searchInput.current?.blur();
+    timing.accepted(); timing.finish();
   }
   function openMail(m: Mail) {
+    const timing = measureAction("open", 1);
     if (list.current) listScroll.current = list.current.scrollTop;
     motion.prepare("switch");
     if (preferences.markRead && m.unread && store.supports("read", m.mailboxId ?? m.account))
       void store.action([m], "read").catch(actionError);
     navigate({ thread: m.id, draft: undefined, view: undefined });
     setSelected([]);
+    timing.accepted(); timing.finish();
   }
   function handleMailRow(event: MouseEvent<HTMLDivElement>) {
     if (!(event.target instanceof Element)) return;
@@ -637,7 +738,7 @@ export default function App() {
       void store.flushDraft(currentDraft.id).catch(actionError);
     }
     navigate({ thread: undefined, draft: undefined, view: undefined });
-    setProfile(false);
+    setSenderSelection(null);
   }
   function toggleComposeFocus() {
     if (document.activeElement?.closest(".compose-view"))
@@ -686,6 +787,15 @@ export default function App() {
     }
     try { await store.newDraft(route.account, { mode, popOut, mail: currentMail, sourceMessageId }); }
     catch (error) { actionError(error); }
+  }
+  async function composeContact() {
+    if (!contextContact || !contextSender?.canSend) return;
+    motion.prepare("switch");
+    try {
+      const draft = await store.newDraft(contextSender.id, { to: contextContact.email });
+      navigate({ draft: draft.id, thread: undefined, view: undefined });
+      setSearch(false);
+    } catch (error) { actionError(error); }
   }
   function updateDraft(draft: Draft) {
     const current = drafts.find(value => value.id === draft.id);
@@ -744,9 +854,12 @@ export default function App() {
       return;
     }
     if (!ids.length) return;
+    const timing = measureAction(action, ids.length);
+    if (action === "not-important" && inbox.pending) { timing.finish("ignored"); return; }
     const previousRoute = route;
     const previousHighlight = highlight;
-    const before = mail.filter((m) => ids.includes(m.id));
+    const selectedIds = new Set(ids);
+    const before = mail.filter((m) => selectedIds.has(m.id));
     if (
       action === "done" &&
       before.every((m) => ["Done", "Trash"].includes(m.folder))
@@ -755,17 +868,19 @@ export default function App() {
     if (!inbox.host?.allowProviderWrites && before.some(message => !message.operationId) &&
       (["star", "unread", "read", "trash", "spam"].includes(action) || action === "inbox" && before.some(message => ["Auto Archived", "Spam", "Trash"].includes(message.folder)))) {
       setNotice({ text: "Provider changes are disabled by this read-only host." });
+      timing.finish("ignored");
       return;
     }
     const finishMotion = motion.prepare("remove", ids);
     const starred = before.some((m) => !m.starred);
     const unread = before.some((m) => !m.unread);
     let reverse: () => Promise<void>;
-    try { reverse = await store.action(before, action); }
-    catch (error) { actionError(error); return; }
+    try { reverse = await store.action(before, action); timing.accepted(); }
+    catch (error) { actionError(error); timing.finish("error"); return; }
     finally { finishMotion(); }
     const labels: Record<string, string> = {
       done: "Marked as Done.",
+      "not-important": "Marked Done. Not-important feedback saved; categorization is unchanged.",
       trash: "Moved to Trash",
       spam: "Moved to Spam",
       inbox: "Moved to Inbox",
@@ -782,7 +897,7 @@ export default function App() {
     setSelected([]);
     if (
       currentMail &&
-      ["done", "trash", "spam", "inbox", "mute", "cancel"].includes(action)
+      ["done", "not-important", "trash", "spam", "inbox", "mute", "cancel"].includes(action)
     ) {
       const next =
         visibleMail[
@@ -795,6 +910,7 @@ export default function App() {
     if (!["star", "unread"].includes(action))
       setHighlight((v) => Math.max(0, Math.min(v, rowCount - 2)));
     setOverlay(null);
+    timing.finish();
   }
   async function remind(when: string) {
     const before = targets;
@@ -928,7 +1044,17 @@ export default function App() {
     }
   }
   const commandDraft = drafts.find((draft) => draft.id === commandDraftId);
+  const lastFeedback = inbox.attentionFeedback.find(event => event.status === "active");
   const commandItems: CommandItem[] = [
+    ...(!commandDraft && store.canRecordFeedback(targets) && !inbox.pending ? [{
+      label: "Done + not important to me", detail: "Save feedback only. This does not change future categorization.", key: "W", icon: "Check", run: () => applyAction("not-important"),
+    }] : []),
+    ...(lastFeedback ? [{
+      label: "Undo last not-important feedback", detail: "Retract the saved feedback and restore its previous Done state", key: "", icon: "ArrowLeft", run: () => {
+        setOverlay(null);
+        void store.undoFeedback(lastFeedback.id).then(() => setNotice({ text: "Feedback retracted and Done state restored." })).catch(actionError);
+      },
+    }] : []),
     ...(commandDraft
       ? [
           {
@@ -1172,7 +1298,7 @@ export default function App() {
               : "list",
       editing: !!editing,
       richText: !!editing?.hasAttribute("contenteditable"),
-      interactive: !!target?.closest("button,a"),
+      interactive: !!target?.closest("button,a,summary"),
       modal: !!document.querySelector("[aria-modal=true]"),
       navigation,
       settings,
@@ -1268,7 +1394,7 @@ export default function App() {
         else closeNavigation();
         break;
       case "goFolder":
-        goFolder(intent.folder, intent.split);
+        goFolder(intent.folder, intent.split ? preferences.splits.find(name => attentionSplit({ splitRules: (preferences.splitRules as Record<string, string>) || {}, splitAliases: (preferences.splitAliases as Record<string, string>) || {} }, name) === intent.split) || intent.split : undefined);
         break;
       case "labelMode":
         openOverlay("label");
@@ -1362,6 +1488,11 @@ export default function App() {
     return () => removeEventListener("keydown", onKey);
   }, []);
 
+  if (!inbox.loaded) {
+    // Stay blank until the first snapshot arrives; an initial failure adds only the floating notice with Retry.
+    return <div className="app" data-inbox-state={inbox.loading ? "loading" : "error"}>{inbox.loading ? null : notices}</div>;
+  }
+
   const composer = currentDraft && (
     <Composer
       draft={currentDraft}
@@ -1445,18 +1576,6 @@ export default function App() {
         </div>
       </nav>
       <main className="mail-workspace" data-folder={route.folder}>
-        {(inbox.loading || inbox.error) && (
-          <div className="inbox-connection-status" role={inbox.error ? "alert" : "status"}>
-            <span>{inbox.error || "Connecting to the inbox…"}</span>
-            {inbox.error && <button type="button" onClick={() => { void store.retry(); }}>Retry</button>}
-          </div>
-        )}
-        {!inbox.loading && !inbox.error && inbox.host && !inbox.host.allowProviderWrites && (
-          <div className="inbox-connection-status inbox-read-only" role="status">
-            <span>Read-only · Sending and provider changes are disabled.</span>
-            <button type="button" onClick={() => openSettings("Add Accounts")}>Accounts</button>
-          </div>
-        )}
         {route.view === "calendar" ? (
           <CalendarView
             initialView={calendarInitialView}
@@ -1473,7 +1592,7 @@ export default function App() {
             onOpenFolders={() => setNavigation(true)}
             onOpenSettings={() => openSettings()}
           />
-        ) : !inbox.loading && !inbox.error && inbox.accounts.length === 0 ? (
+        ) : inbox.accounts.length === 0 ? (
           <div className="inbox-setup-empty">
             <h1>Connect an account</h1>
             <button className="settings-button" type="button" onClick={() => openSettings("Add Accounts")}>Add accounts</button>
@@ -1511,8 +1630,8 @@ export default function App() {
             onSearch={() => currentDraft && startSearch(currentDraft.id)}
             onToggleFocus={toggleComposeFocus}
             onImageSettings={() => openSettings("Images")}
-            onOpenProfile={() => {
-              setProfile(true);
+            onOpenProfile={(messageId) => {
+              setSenderSelection({ threadId: currentMail.id, messageId });
               setMobileSidebar(true);
             }}
           />
@@ -1527,10 +1646,6 @@ export default function App() {
                   onClick={() => setNavigation(!navigation)}
                 />
               )}
-              {!search && !selected.length && <button type="button" className="inbox-scope-selector" onClick={() => openOverlay("accounts")} title={accountTitle} aria-label={`Choose inbox. Current: ${accountTitle}`}>
-                <Icon name={isUnified ? "Inbox" : "Envelope"} size={16} />
-                <span>{accountTitle}</span><Icon name="ChevronDown" size={12} />
-              </button>}
               {search ? (
                 <div className="search-field">
                   <input
@@ -1636,9 +1751,9 @@ export default function App() {
               )}
               {!selected.length && (
                 <div className="header-actions">
-                  <button type="button" className="text-button inbox-refresh" disabled={!activeAccount || inbox.refreshing} onClick={() => { void store.sync(route.account).catch(actionError); }}>
-                    {inbox.refreshing ? "Refreshing…" : "Refresh"}
-                  </button>
+                  <IconButton name="Refresh" title="Refresh inbox" className="inbox-refresh"
+                    aria-busy={inbox.refreshing} disabled={!activeAccount || inbox.refreshing}
+                    onClick={() => { void store.sync(route.account).catch(actionError); }} />
                   {mailFilter && (
                     <button
                       className="mail-filter"
@@ -1773,7 +1888,8 @@ export default function App() {
                 ))
               ) : (
                 <MailRows
-                  entries={entries}
+                  getWindow={getMailWindow}
+                  getHighlighted={getHighlightedMail}
                   totalHeight={totalHeight}
                   rowHeight={rowHeight}
                   virtualized={virtualized}
@@ -1788,7 +1904,6 @@ export default function App() {
                 />
               )}
               {rowCount === 0 &&
-                !inbox.loading && !inbox.error &&
                 !(search && searchResult?.key === searchKey && (searchResult.loading || searchResult.error)) &&
                 !motion.hasExits &&
                 !(search && (!query || !searchSubmitted)) && (
@@ -1836,7 +1951,7 @@ export default function App() {
           settings
             ? "Settings"
             : currentMail || route.draft
-              ? "Contact details"
+              ? "Sender context"
               : "Recent Opens"
         }
       >
@@ -1873,6 +1988,13 @@ export default function App() {
               accounts={inbox.accounts.map(account => account.email)}
               host={inbox.host}
               store={store}
+              onboardingReturn={onboardingReturn}
+              onOnboardingDone={() => {
+                setOnboardingReturn(null);
+                setSettings(false);
+                setMobileSidebar(false);
+                void store.refresh(true);
+              }}
             />
           ) : search && !currentMail ? (
             <section className="search-sidebar">
@@ -1886,13 +2008,24 @@ export default function App() {
                 ))}
               </div>
             </section>
-          ) : currentMail || route.draft || profile ? (
+          ) : currentMail && contextContact && !route.draft ? (
+            <SenderContext
+              key={`${route.account}:${contextContact.email.toLowerCase()}`}
+              contact={contextContact}
+              history={inbox.senderHistory}
+              mailboxIds={contextMailboxIds}
+              getConversations={getSenderConversations}
+              currentThreadId={currentMail.id}
+              remoteImages={inbox.policy?.remoteImages === true}
+              showLogos={preferences.showAvatars !== false}
+              canCompose={contextSender?.canSend === true}
+              onCompose={() => { void composeContact(); }}
+              onOpen={openMail}
+              onImageSettings={() => openSettings("Images")}
+            />
+          ) : currentMail || route.draft ? (
             <div className="contact-panel">
-              <h2>
-                {route.draft || currentMail?.folder === "Sent"
-                  ? userProfile.name
-                  : currentMail?.from || userProfile.name}
-              </h2>
+              <h2>{userProfile.name}</h2>
               <div className="contact-identity">
                 <div className="contact-avatar">
                   <Icon name="User" size={45} />
@@ -1902,68 +2035,31 @@ export default function App() {
                 </div>
                 <div>
                   <b>
-                    {route.draft
-                      ? currentDraft?.from || accountEmail
-                      : currentMail?.email || accountEmail}
+                    {currentDraft?.from || currentMail?.email || accountEmail}
                   </b>
-                  <p>{route.draft ? userProfile.location : ""}</p>
+                  <p>{userProfile.location}</p>
                 </div>
               </div>
-              {route.draft ? (
-                <>
-                  <button
-                    className="primary-button"
-                    onClick={() => openOverlay("profile")}
-                  >
-                    Edit Profile
-                  </button>
-                  <p className="contact-bio">{userProfile.bio}</p>
-                  {userProfile.website && <button
-                    className="contact-link"
-                    onClick={() =>
-                      window.open(
-                        `https://${userProfile.website}`,
-                        "_blank",
-                        "noopener,noreferrer",
-                      )
-                    }
-                  >
-                    <Icon name="Link" />
-                    {userProfile.website}
-                  </button>}
-                </>
-              ) : (
-                <>
-                  <button
-                    className="contact-link"
-                    disabled={!activeAccount?.canSend}
-                    onClick={() => { void newDraft().then(draft => { if (draft) store.editDraft({ ...draft, to: currentMail?.email || "" }); }); }}
-                  >
-                    <Icon name="Envelope" />
-                    Compose email
-                  </button>
-                  <h3>Recent conversations</h3>
-                  {accountMail
-                    .filter((m) => m.email === currentMail?.email)
-                    .slice(0, 5)
-                    .map((m) => (
-                      <button
-                        key={m.id}
-                        className="related-mail"
-                        onClick={() => openMail(m)}
-                      >
-                        {m.subject}
-                        <span>{m.date}</span>
-                      </button>
-                    ))}
-                  {currentMail?.opened && (
-                    <div className="contact-read-status">
-                      <Icon name="Eye" />
-                      Last opened {currentMail.opened}
-                    </div>
-                  )}
-                </>
-              )}
+              <button
+                className="primary-button"
+                onClick={() => openOverlay("profile")}
+              >
+                Edit Profile
+              </button>
+              <p className="contact-bio">{userProfile.bio}</p>
+              {userProfile.website && <button
+                className="contact-link"
+                onClick={() =>
+                  window.open(
+                    `https://${userProfile.website}`,
+                    "_blank",
+                    "noopener,noreferrer",
+                  )
+                }
+              >
+                <Icon name="Link" />
+                {userProfile.website}
+              </button>}
             </div>
           ) : preferences.recentOpens ? (
             <RecentOpens mail={recent} />
@@ -2292,34 +2388,7 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {notice && (
-        <div
-          className={`toast ${noticeFading ? "is-fading" : ""}`}
-          role="status"
-          onMouseEnter={() => setNoticeHovered(true)}
-          onMouseLeave={() => setNoticeHovered(false)}
-        >
-          <span className="toast-status">{notice.text}</span>
-          {notice.undo && (
-            <button
-              className="toast-undo"
-              onClick={() => {
-                notice.undo?.();
-                setNotice(null);
-              }}
-            >
-              Undo
-            </button>
-          )}
-          <IconButton
-            name="Notification-closeIcon"
-            title="Dismiss notification"
-            size={10}
-            className="toast-close"
-            onClick={() => setNotice(null)}
-          />
-        </div>
-      )}
+      {notices}
     </div>
   );
 }

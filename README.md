@@ -14,11 +14,75 @@ Requires **Bun 1.4+**.
    ```
 2. Start the app:
    ```sh
-   bun --no-env-file run dev
+    bun --no-env-file run start
    ```
 3. Open **http://localhost:5178**.
 
 The first run starts two fictional mailboxes through the real Inbox SDK. No provider credentials, OAuth setup, OpenCan, or machine-specific services are needed. **Ctrl-C stops both the client and local host.**
+
+`start` builds and serves the optimized client locally. Use `bun --no-env-file run dev` for hot-reloading development; development-mode React diagnostics add overhead on large mailboxes. Both commands keep the same local-only host, sessions, and provider configuration.
+
+## Docker with persistent storage
+
+Run `docker compose up -d --build --wait`, then open **http://localhost:5178**.
+The image contains the built app, not your configuration or mail. On first run,
+the app creates a fictional installation in the named volume **`superlocal-state`**:
+
+```text
+/persist/superlocal.local.json
+/persist/data/mock/             # Fictional mail, databases and generated keys
+/persist/data/real/             # Created when real mode is selected
+```
+
+Each mode keeps `host.sqlite`, its mail database(s), `runtime-secrets.json` and
+SQLite journals together. Configure real providers in the retained config as
+described below; **never replace its instance ID or keys during an update**.
+Google OAuth client secrets can be supplied through the same explicit environment
+variables used locally. They are runtime inputs, not image build arguments.
+
+After updating the checkout, run `docker compose up -d --build --wait` again.
+Compose replaces the app container and reattaches the same volume. A hosting
+platform's Git-triggered redeploy must likewise retain this volume at `/persist`;
+the GitHub workflow below publishes images but does not restart a remote host.
+`docker compose down` retains the volume; **do not use `down -v` or delete the
+volume when updating**. Back up config, databases and keys together with the app
+stopped. Existing Mac installations are not imported automatically.
+
+Set `SUPERLOCAL_DOCKER_PORT` to use another local port and `SUPERLOCAL_VOLUME_NAME`
+only for a deliberately separate installation. Do not run two app instances on
+the same volume. Named volumes are initialized for the image's non-root `bun`
+user; a bind-mount replacement must be owned by that user's UID/GID (1000:1000),
+with private directories and `0600` config/key files.
+
+Only the web port is published, on host loopback. The backend stays inside the
+container. Public hosting/authentication is unchanged. Browser-local settings
+and recovery copies remain in the browser; this volume preserves server state.
+
+### Published images
+
+Pushes to `main` build and publish **Linux AMD64 and ARM64** images at
+`ghcr.io/r44vc0rp/superlocal:latest`. The workflow can also be run manually on
+`main`. It uses GitHub's built-in `GITHUB_TOKEN` with package-write permission;
+no Docker Hub account or registry password is needed. Images also receive a
+`sha-<full-commit-sha>` tag, and the workflow records the digest for pinned deploys.
+
+To run or update the published image without building it locally:
+
+```sh
+SUPERLOCAL_IMAGE=ghcr.io/r44vc0rp/superlocal:latest \
+  docker compose up -d --no-build --pull always --wait
+```
+
+The same `superlocal-state` volume is retained. Set `SUPERLOCAL_IMAGE` to a
+commit-specific tag or digest to select a particular version; database migrations
+may still limit downgrades. Other container hosts can use the same image and mount
+`/persist` without Compose. Server restarts/webhooks remain host-specific.
+
+GHCR packages initially default to private, even for a public repository. The
+package owner must set its visibility to public once for anonymous pulls. A
+private package instead requires a GitHub token with `read:packages` on the
+deployment host. This workflow never includes runtime mail, keys or config in
+the image, and does not change the application's local-only authentication.
 
 ## One inbox, separate mailboxes
 
@@ -88,7 +152,7 @@ The SDK currently runs on Bun and SQLite. The included host is local-only; publi
 The current Gmail, Microsoft 365, and Inbound connectors use the local host configuration:
 
 1. Stop the app and open the generated, git-ignored `superlocal.local.json`.
-2. Set `mode` to `real` and enable `providers.gmail.enabled`, `providers.outlook.enabled`, and/or `providers.inbound.enabled`.
+2. Set `mode` to `real` and enable `providers.gmail.enabled`, `providers.outlook.enabled`, `providers.inbound.enabled`, and/or `providers.imap.enabled`.
 3. For Gmail, configure the host's Google OAuth web client. Register **`http://localhost:5178/v1/oauth/google/callback`** for the default local setup. Google does not accept `.local` redirect domains; use the configured localhost origin for local authorization.
 4. For Microsoft 365 / Exchange Online, register an Entra ID (Azure AD) web app. Delegated Graph permissions: **`User.Read`**, **`Mail.ReadWrite`**, **`Mail.Send`**, plus **`openid`**, **`profile`**, **`email`**, and **`offline_access`**. Register **`http://localhost:5178/v1/oauth/outlook/callback`** as a web redirect URI. Use `providers.outlook.tenant` `common` (any work/school or personal account), `organizations` (work/school only), `consumers` (personal only), or a specific tenant ID.
 5. Restart the app and open **Settings → Add Accounts**. Inbound takes an API key, then offers discovered mailboxes. Gmail and Microsoft 365 use the host-managed OAuth flow.

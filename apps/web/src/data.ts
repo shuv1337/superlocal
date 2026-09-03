@@ -1,4 +1,5 @@
 import type { MailboxMembership } from "inbox-sdk/types";
+import type { AttentionDecision } from "../../shared/mail-attention";
 
 export { readSaved as loadSaved } from "./storage.ts";
 
@@ -28,6 +29,7 @@ export type Message = {
   cancelled?: boolean;
   revision?: number;
   loaded?: boolean;
+  bodyRevision?: string;
   outgoing?: boolean;
   hasAttachments?: boolean;
   operationId?: string;
@@ -37,6 +39,7 @@ export type Message = {
   isRead?: boolean;
   isStarred?: boolean;
   memberships?: MailboxMembership[];
+  attention?: AttentionDecision;
 };
 export type Mail = {
   id: string;
@@ -156,7 +159,7 @@ export const defaultPreferences: Preferences = {
   autoAdvance: true,
   markRead: true,
   spellcheck: true,
-  splits: ["Important", "Github", "Inbound", "Calendar", "Other"],
+  splits: ["Important", "Other"],
   startWeek: "Sunday",
   timeFormat: "12 hour",
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",

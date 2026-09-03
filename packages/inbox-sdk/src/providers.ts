@@ -1,13 +1,14 @@
-import { GmailProvider } from '../server/sdk/gmail'
+import { GmailProvider, GMAIL_CATEGORY_ROLES } from '../server/sdk/gmail'
 import { ImapProvider } from '../server/sdk/imap'
 import { InboundProvider } from '../server/sdk/inbound'
 import { OutlookProvider } from '../server/sdk/outlook'
 import { ProviderError } from '../server/sdk/types'
-import type { ProviderDefinition } from './contracts'
+import { CredentialError, type ProviderDefinition } from './contracts'
 
 export const builtInProviders: readonly ProviderDefinition[] = Object.freeze([
   {
     id: 'gmail', name: 'Gmail', connection: 'oauth',
+    nativeCategoryRoles: GMAIL_CATEGORY_ROLES,
     scopes: ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/gmail.send'],
     create: (credentials) => {
       if (typeof credentials.accessToken !== 'string' || !credentials.accessToken) {
@@ -27,8 +28,11 @@ export const builtInProviders: readonly ProviderDefinition[] = Object.freeze([
     },
   },
   {
-    id: 'imap', name: 'IMAP', connection: 'credentials',
-    create: (credentials) => new ImapProvider(credentials),
+    id: 'imap', name: 'IMAP', connection: 'credentials', credentialReconnect: false,
+    create: (credentials, context) => new ImapProvider({ ...credentials, signal: context?.signal }),
+    // Passwords have no refresh protocol. Stop background authentication retries until
+    // the trusted host replaces/re-authorizes the connection's credentials.
+    refresh: async () => { throw new CredentialError('revoked', 'Reconnect with a valid mail password.') },
   },
   {
     id: 'inbound', name: 'Inbound', connection: 'credentials', mailboxSelection: 'manual', credentialReconnect: false,

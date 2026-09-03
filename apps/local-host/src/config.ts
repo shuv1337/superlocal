@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url'
 export const ROOT_DIR = fileURLToPath(new URL('../../../', import.meta.url))
 export type Mode = 'mock' | 'real'
 export type SecretSource = string | { env: string } | null
+/** Trusted endpoint presets, never supplied by the browser or containing mail passwords. */
+export interface ImapHostPreset {
+  id: string
+  name: string
+  imap: { host: string; port: number; secure: boolean }
+  smtp?: { host: string; port: number; secure: boolean }
+  sentCopy: 'server' | 'append'
+}
 export interface LocalConfig {
   configPath: string
   instanceId: string
@@ -21,6 +29,7 @@ export interface LocalConfig {
     gmail: { enabled: boolean; oauth: { clientId: SecretSource; clientSecret: SecretSource; scopes: string[] } }
     inbound: { enabled: boolean }
     outlook: { enabled: boolean; tenant: string; oauth: { clientId: SecretSource; clientSecret: SecretSource; scopes: string[] } }
+    imap: { enabled: boolean; servers: ImapHostPreset[] }
   }
 }
 
@@ -124,6 +133,7 @@ function defaults() {
         clientId: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' }, clientSecret: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_SECRET' },
         scopes: ['openid', 'profile', 'email', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Mail.Send'],
       } },
+      imap: { enabled: true, servers: [] },
     },
   }
 }
@@ -149,11 +159,27 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
   const backend = record(input.backend, 'backend', ['port'])
   const auth = record(input.auth, 'auth', ['method', 'sessionHours'])
   const writes = record(input.allowProviderWrites, 'allowProviderWrites', ['mock', 'real'])
-  const providers = record(input.providers, 'providers', ['mock', 'gmail', 'inbound', 'outlook'])
+  const providers = record(input.providers, 'providers', ['mock', 'gmail', 'inbound', 'outlook', 'imap'])
   const mock = record(providers.mock, 'providers.mock', ['enabled'])
   const gmail = record(providers.gmail, 'providers.gmail', ['enabled', 'oauth'])
   const inbound = record(providers.inbound, 'providers.inbound', ['enabled'])
   const outlook = providers.outlook === undefined ? undefined : record(providers.outlook, 'providers.outlook', ['enabled', 'tenant', 'oauth'])
+  const imap = record(providers.imap ?? { enabled: true, servers: [] }, 'providers.imap', ['enabled', 'servers'])
+  if (!Array.isArray(imap.servers ?? []) || ((imap.servers ?? []) as unknown[]).length > 16) invalid('providers.imap.servers')
+  const imapServers: ImapHostPreset[] = ((imap.servers ?? []) as unknown[]).map(value => {
+    const server = record(value, 'IMAP server preset', ['id', 'name', 'imap', 'smtp', 'sentCopy'])
+    if (typeof server.id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(server.id) || server.id === 'icloud') invalid('IMAP preset id')
+    if (typeof server.name !== 'string' || !server.name.trim() || server.name.length > 80 || /[\x00-\x1f\x7f]/.test(server.name)) invalid('IMAP preset name')
+    const endpoint = (value: unknown) => {
+      const input = record(value, 'mail endpoint', ['host', 'port', 'secure'])
+      if (typeof input.host !== 'string' || input.host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(input.host) ||
+        /(?:^|\.)(?:localhost|local|internal|test|invalid|example)$/i.test(input.host)) invalid('public mail server hostname')
+      return { host: input.host.toLowerCase(), port: port(input.port, 'mail server port'), secure: bool(input.secure, 'mail transport (false requires STARTTLS)') }
+    }
+    if (server.sentCopy !== 'server' && server.sentCopy !== 'append') invalid('IMAP Sent-copy policy')
+    return { id: server.id, name: server.name, imap: endpoint(server.imap), ...(server.smtp ? { smtp: endpoint(server.smtp) } : {}), sentCopy: server.sentCopy }
+  })
+  if (new Set(imapServers.map(server => server.id)).size !== imapServers.length) invalid('unique IMAP preset ids')
   const oauth = record(gmail.oauth, 'providers.gmail.oauth', ['clientId', 'clientSecret', 'scopes'])
   const outlookOauth = outlook === undefined ? undefined : record(outlook.oauth, 'providers.outlook.oauth', ['clientId', 'clientSecret', 'scopes'])
   if (auth.method !== 'loopback' || typeof auth.sessionHours !== 'number' || !Number.isInteger(auth.sessionHours) || auth.sessionHours < 1 || auth.sessionHours > 24) invalid('auth (loopback, 1–24 sessionHours)')
@@ -187,7 +213,8 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
     configPath, instanceId: input.instanceId, mode: input.mode, dataDir,
     web: { port: webPort, origin: webOrigin, allowedOrigins: [...new Set([webOrigin, `http://localhost:${webPort}`, `http://127.0.0.1:${webPort}`, ...web.allowedOrigins.map(origin)])] },
     backend: { port: apiPort }, auth: { method: 'loopback', sessionHours: auth.sessionHours }, allowProviderWrites: policy[input.mode],
-    providers: { mock: { enabled: enabledMock }, inbound: { enabled: bool(inbound.enabled, 'providers.inbound.enabled') }, gmail: {
+    providers: { mock: { enabled: enabledMock }, inbound: { enabled: bool(inbound.enabled, 'providers.inbound.enabled') },
+      imap: { enabled: bool(imap.enabled, 'providers.imap.enabled'), servers: imapServers }, gmail: {
       enabled: bool(gmail.enabled, 'providers.gmail.enabled'), oauth: {
         clientId: secretSource(oauth.clientId, 'providers.gmail.oauth.clientId'), clientSecret: secretSource(oauth.clientSecret, 'providers.gmail.oauth.clientSecret'), scopes: oauth.scopes as string[],
       },

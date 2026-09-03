@@ -535,6 +535,7 @@ kbd {
   color: var(--muted);
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 7px;
   margin-left: 8px;
 }
@@ -552,6 +553,14 @@ kbd {
   color: #d1b1cf;
 }
 .row-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(160px, 25%);
+  margin-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
   font-size: 10px;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -1274,6 +1283,9 @@ kbd {
   overflow: auto;
   box-shadow: 0 12px 40px #0005;
 }
+.modal:focus {
+  outline: none;
+}
 .app-modal {
   width: 560px;
 }
@@ -1649,9 +1661,6 @@ kbd {
   padding: 10px;
   margin-left: -10px;
   margin-right: 8px;
-}
-.app:has(.inbox-zero) .toast {
-  bottom: 68px;
 }
 .toggle {
   width: 30px;
