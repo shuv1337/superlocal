@@ -145,6 +145,7 @@ export type Preferences = {
   notificationSound: boolean;
   showSnippets: boolean;
   recentOpens: boolean;
+  rightSidebar: boolean;
   signature: string;
   signatureEnabled: boolean;
   autoAdvance: boolean;
@@ -186,6 +187,7 @@ export const defaultPreferences: Preferences = {
   notificationSound: false,
   showSnippets: true,
   recentOpens: true,
+  rightSidebar: true,
   signature: "",
   signatureEnabled: false,
   autoAdvance: true,

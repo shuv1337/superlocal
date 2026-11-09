@@ -67,7 +67,6 @@ const defaultSplitRules: Record<string, string> = Object.assign(Object.create(nu
 });
 
 const inlineToggles: Record<string, [string, boolean]> = {
-  "Recent Opens": ["recentOpens", true],
   "Show Snippets": ["showSnippets", true],
   Spellcheck: ["spellcheck", true],
   "Read Statuses": ["readReceipts", true],
@@ -1022,6 +1021,14 @@ export function Settings({
           >
             The quick brown fox jumps over the lazy dog.
           </div>
+        </>
+      );
+      break;
+    case "Recent Opens":
+      content = (
+        <>
+          {toggle("recentOpens", "Recent Opens", true)}
+          {toggle("rightSidebar", "Show right sidebar", true, "Off hides the right column everywhere, including sender details while reading. Settings moves to the left rail; status updates appear only while active.")}
         </>
       );
       break;

@@ -1952,3 +1952,29 @@ kbd {
   justify-content: space-between;
   gap: 12px;
 }
+/* Preference: no right column on desktop. Settings moves to the rail; transient status cards float. */
+@media (min-width: 701px) {
+  .app.right-sidebar-hidden .rail-mobile-actions { display: flex; flex-direction: column; }
+  .app.right-sidebar-hidden .rail-recent-opens { display: none; }
+  .app.right-sidebar-hidden:not(.settings-open) > .right-sidebar {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: var(--sidebar-width);
+    min-width: 260px;
+    height: auto;
+    background: transparent;
+    border: 0;
+    pointer-events: none;
+    z-index: 40;
+  }
+  .app.right-sidebar-hidden:not(.settings-open) > .right-sidebar > :is(.sidebar-content, .sidebar-footer, .mobile-sidebar-close) {
+    display: none;
+  }
+  .app.right-sidebar-hidden:not(.settings-open) > .right-sidebar > :is(section, :has(section)) {
+    pointer-events: auto;
+    background: var(--sidebar);
+    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+  }
+}

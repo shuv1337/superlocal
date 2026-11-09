@@ -2107,7 +2107,7 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
 
   return (
     <div
-      className={`app ${navigation ? "navigation-open" : ""} ${settings ? "settings-open" : ""} ${mobileSidebar ? "mobile-sidebar-open" : ""} ${route.view === "calendar" || route.view === "snippets" ? "auxiliary-view" : ""}`}
+      className={`app ${navigation ? "navigation-open" : ""} ${settings ? "settings-open" : ""} ${mobileSidebar ? "mobile-sidebar-open" : ""} ${route.view === "calendar" || route.view === "snippets" ? "auxiliary-view" : ""} ${preferences.rightSidebar === false ? "right-sidebar-hidden" : ""}`}
       data-inbox-state={inbox.loading ? "loading" : inbox.error ? "error" : "ready"}
       onPointerDownCapture={() => { actionNavigationVersion.current++; }}
     >
@@ -2149,6 +2149,7 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
           <IconButton
             name="Eye"
             title="Recent Opens"
+            className="rail-recent-opens"
             onClick={() => {
               if (!leaveSettings()) return;
               history.replaceState({ superlocalIndex: historyPosition.current }, "", routeUrl(route));
