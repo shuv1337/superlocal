@@ -42,7 +42,7 @@ const date = z.string().min(1).max(100).refine((value) => Number.isFinite(Date.p
 const name = z.string().min(1).max(512)
 const credentials = z.record(z.string(), z.unknown())
 const participant = z.strictObject({
-  name: z.string().max(1024), email: z.string().min(1).max(1024), avatar: z.string().nullable().optional(),
+  name: z.string().max(1024), email: z.string().max(1024), avatar: z.string().nullable().optional(),
 })
 const draftInput = z.strictObject({
   accountId: id,

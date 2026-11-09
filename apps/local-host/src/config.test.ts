@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadLocalConfig, LocalConfigurationError } from './config'
+import { createRealRegistrations } from './providers'
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -80,5 +81,31 @@ describe('local host configuration', () => {
       },
     })
     expect(() => loadLocalConfig({ configPath: path, environment: {} })).toThrow(LocalConfigurationError)
+  })
+
+  test('oauth onboarding copy names Google and Microsoft separately', async () => {
+    const path = await configFile({
+      mock: { enabled: true }, gmail: { ...gmail, enabled: true }, inbound: { enabled: false },
+      outlook: {
+        enabled: true, tenant: 'common',
+        oauth: {
+          clientId: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' },
+          clientSecret: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_SECRET' },
+          scopes: ['openid', 'profile', 'email', 'offline_access', 'User.Read', 'Mail.ReadWrite', 'Mail.Send'],
+        },
+      },
+    })
+    const config = loadLocalConfig({ configPath: path, environment: {} })
+    const onboarding = Object.fromEntries(createRealRegistrations(config, {} as never, {}).registrations.map(item => [item.onboarding.id, item.onboarding]))
+    expect(onboarding.gmail).toMatchObject({
+      name: 'Gmail', ready: false, actionLabel: 'Sign in with Google', method: 'Sign in with your Google account',
+    })
+    expect(onboarding.gmail.authorizeNote).toContain('Google')
+    expect(onboarding.gmail.authorizeNote).not.toContain('Microsoft')
+    expect(onboarding.outlook).toMatchObject({
+      name: 'Microsoft 365', ready: false, actionLabel: 'Sign in with Microsoft', method: 'Sign in with your Microsoft account',
+    })
+    expect(onboarding.outlook.authorizeNote).toContain('Microsoft')
+    expect(onboarding.outlook.authorizeNote).not.toContain('Google')
   })
 })

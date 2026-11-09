@@ -19,6 +19,8 @@ export interface HostProvider {
   ready: boolean
   setupMessage?: string
   actionLabel?: string
+  method?: string
+  authorizeNote?: string
   fields?: Array<{ name: string; label: string; type: 'password' | 'text' | 'email' | 'select'; required: boolean; advanced?: boolean; defaultValue?: string; options?: Array<{ value: string; label: string }> }>
   mailboxSelection?: 'automatic' | 'manual'
   credentialHelp?: { text: string; url: string }
@@ -71,6 +73,8 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
     registrations.push({
       definition: { ...builtIn('gmail', 'https://gmail.googleapis.com/gmail/v1'), scopes: config.providers.gmail.oauth.scopes, refresh: createGoogleCredentialRefresh(googleConfig) },
       onboarding: { id: 'gmail', name: 'Gmail', connection: 'oauth', enabled: true, ready: !!googleConfig, actionLabel: 'Sign in with Google',
+        method: 'Sign in with your Google account',
+        authorizeNote: 'You will be sent to Google to approve access, then brought back here while your mail loads.',
         ...(!googleConfig ? { setupMessage: 'Set providers.gmail.oauth.clientId and clientSecret in superlocal.local.json (or their explicit environment references), register web.origin + /v1/oauth/google/callback with Google, then restart.' } : {}) },
       async connect(inbox, owner, _credentials, origin) {
         if (origin !== config.web.origin) throw new InboxError('HOST_OAUTH_ORIGIN_REQUIRED', 'Open the configured web.origin before starting OAuth so its session and callback stay on the same origin.', 409)
@@ -116,6 +120,8 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
     registrations.push({
       definition: { ...builtIn('outlook', 'https://graph.microsoft.com/v1.0'), scopes: config.providers.outlook.oauth.scopes, refresh: createMicrosoftCredentialRefresh(microsoftConfig) },
       onboarding: { id: 'outlook', name: 'Microsoft 365', connection: 'oauth', enabled: true, ready: !!microsoftConfig, actionLabel: 'Sign in with Microsoft',
+        method: 'Sign in with your Microsoft account',
+        authorizeNote: 'You will be sent to Microsoft to approve access, then brought back here while your mail loads.',
         ...(!microsoftConfig ? { setupMessage: 'Set providers.outlook.oauth.clientId and clientSecret in superlocal.local.json (or their explicit environment references), register web.origin + /v1/oauth/outlook/callback with Microsoft Entra, then restart.' } : {}) },
       async connect(inbox, owner, _credentials, origin) {
         if (origin !== config.web.origin) throw new InboxError('HOST_OAUTH_ORIGIN_REQUIRED', 'Open the configured web.origin before starting OAuth so its session and callback stay on the same origin.', 409)

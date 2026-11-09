@@ -13,6 +13,8 @@ export type HostProvider = {
   ready: boolean;
   setupMessage?: string;
   actionLabel?: string;
+  method?: string;
+  authorizeNote?: string;
   fields?: Array<{ name: string; label: string; type: "password" | "text" | "email" | "select"; required: boolean; advanced?: boolean; defaultValue?: string; options?: Array<{ value: string; label: string }> }>;
   mailboxSelection?: "automatic" | "manual";
   credentialHelp?: { text: string; url: string };

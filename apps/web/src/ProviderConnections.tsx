@@ -27,10 +27,11 @@ function coverage(candidates: MailboxCandidate[]): MailboxCandidate[] {
 }
 
 const method = (provider: HostProvider) =>
-  provider.connection === "oauth" ? "Sign in with your Google account"
+  provider.method
+  ?? (provider.connection === "oauth" ? `Sign in with ${provider.name}`
   : provider.fields?.some(field => field.name === "apiKey") ? "Paste an API key"
   : provider.fields?.some(field => field.type === "password") ? "Email and app-specific password"
-  : "";
+  : "");
 
 const statusLabel = (source: Account) =>
   source.status === "reconnect_required" ? "Sign-in required" : source.status === "disconnected" ? "Disconnected" : "Connected";
@@ -286,7 +287,7 @@ export default function ProviderConnections({ host, store, resume, onStepChange,
     return (
       <form className="provider-flow provider-connect" ref={root as unknown as RefObject<HTMLFormElement>} tabIndex={-1} key={`${provider.id}:${step.reconnectId ?? ""}`} onSubmit={event => void connect(event, provider, step.reconnectId)}>
         {provider.connection === "oauth" ? <>
-          <p className="settings-note">You will be sent to Google to approve access, then brought back here while your mail loads.</p>
+          <p className="settings-note">{provider.authorizeNote || "You will be sent to approve access, then brought back here while your mail loads."}</p>
           <button className="settings-button" type="submit">{provider.actionLabel || `Sign in with ${provider.name}`}</button>
         </> : <>
           {reconnecting && <p className="settings-note">Enter a new password for {reconnecting.email || reconnecting.name}. Server settings stay the same.</p>}

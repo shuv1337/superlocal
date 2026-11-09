@@ -1404,6 +1404,21 @@ describe('bounded mailbox snapshot and changes', () => {
     expect(wire.requests.at(-1)!.status).toBe(304)
   })
 
+  test('a native message without a From address does not invalidate the mailbox snapshot', async () => {
+    const h = await fixture()
+    const { account } = await h.seed('alice', 'empty-from', [
+      native('has-from'),
+      native('no-from', { from: { name: '', email: '' } }),
+    ])
+    const mailbox = (await h.inbox.mailboxes('alice')).find(value => value.sourceId === account.id)!
+    const wire = transport(h)
+    const client = createInboxClient({ baseUrl: 'http://inbox.test', fetch: wire.fetch, headers: { authorization: 'Bearer alice' } })
+    const page = await client.mailboxSnapshot({ mailboxIds: [mailbox.id] })
+    expect(page.items).toHaveLength(2)
+    expect(page.items.some(item => item.from.email === '')).toBe(true)
+    expect(page.items.some(item => item.from.email === 'sender@example.test')).toBe(true)
+  })
+
   test('1000 overlapping mailboxes stay bounded, preserve all memberships and expose current scoped absence separately from deletion', async () => {
     const h = await fixture()
     const { account } = await h.seed('alice', 'snapshot-overlap', Array.from({ length: 7 }, (_, index) => native(`overlap-${index}`)))

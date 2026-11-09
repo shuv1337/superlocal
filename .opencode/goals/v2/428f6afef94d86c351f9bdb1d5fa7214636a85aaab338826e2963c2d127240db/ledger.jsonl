@@ -1,0 +1,4 @@
+{"at":1788495788993,"goalID":"goal_8e0f8162-be28-4fb4-9d72-fa73a50bafdd","from":"none","to":"active","code":"created"}
+{"at":1788497079593,"goalID":"goal_8e0f8162-be28-4fb4-9d72-fa73a50bafdd","from":"active","to":"paused","code":"interrupted_by_user"}
+{"at":1788497329852,"goalID":"goal_8e0f8162-be28-4fb4-9d72-fa73a50bafdd","from":"paused","to":"active","code":"resumed"}
+{"at":1788497329909,"goalID":"goal_8e0f8162-be28-4fb4-9d72-fa73a50bafdd","from":"active","to":"completed","code":"completed","detail":"Created a Google OAuth 2.0 Web Client in Google Cloud Console (latitudes-apps) with redirect URI http://localhost:5178/v1/oauth/google/callback, enabled Gmail in superlocal.local.json, host-owned the onboarding copy so Microsoft 365 and Gmail display their respective account and authorization notes, and verified the live OAuth redirect to Google accounts."}

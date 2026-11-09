@@ -169,11 +169,11 @@ export default function App() {
     const url = new URL(location.href);
     const connection = url.searchParams.get("connection");
     if (connection !== "connected" && connection !== "failed") return;
-    const providerId = url.searchParams.get("provider") || "gmail";
+    const providerId = url.searchParams.get("provider");
     const connectionId = url.searchParams.get("connectionId");
     for (const key of ["connection", "provider", "connectionId"]) url.searchParams.delete(key);
     history.replaceState(null, "", url);
-    if (connection === "connected") {
+    if (connection === "connected" && providerId && /^[a-z][a-z0-9-]{0,63}$/.test(providerId)) {
       // Resume onboarding in Add Accounts so the user sees connecting → connected, then lands back in the inbox.
       setOnboardingReturn({ providerId, connectionId: /^[A-Za-z0-9_-]{1,128}$/.test(connectionId ?? "") ? connectionId : null });
       setSettingsPage("Add Accounts");
