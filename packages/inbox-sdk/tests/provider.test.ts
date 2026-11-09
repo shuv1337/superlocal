@@ -503,7 +503,8 @@ async function httpHarness(id: Exclude<BuiltIn, 'imap'>): Promise<ContractHarnes
           return match[2].endsWith('/$value') ? new Response(new Uint8Array(attachments.get(`${message.id}/${attachmentId}`) ?? Buffer.from(file.contentBytes ?? '', 'base64')).buffer, { headers: { 'Content-Type': file.contentType } }) : json(file)
         }
         if (method === 'DELETE') { account.messages.delete(message.id); return new Response(null, { status: 204 }) }
-        if (method === 'PATCH') { Object.assign(message, body); account.changes.push(message) }
+        // Real Graph delta reports an update with the id and only the changed properties.
+        if (method === 'PATCH') { Object.assign(message, body); account.changes.push({ id: message.id, ...body }) }
         if (match[2] === 'move' && method === 'POST') {
           account.changes.push({ id: message.id, '@removed': { reason: 'deleted' } })
           message.parentFolderId = folderId(graphRole(body.destinationId) ?? body.destinationId)
@@ -2204,6 +2205,20 @@ describe('provider-specific native failures and effective grants', () => {
       expect(reset.snapshotComplete).toBe(false)
       expect(reset.deletedMessageIds).toEqual([])
       expect(reset.messages).toHaveLength(1)
+    } finally { await h.close() }
+  })
+
+  test('outlook delta updates carrying only changed properties are hydrated, never stored as blank messages', async () => {
+    const h = await httpHarness('outlook')
+    try {
+      const initial = await h.provider.sync(null, { folder: 'inbox', limit: 100 })
+      const original = initial.messages.find((message) => message.id === h.rootId)!
+      await h.provider.mutate(h.rootId, { isRead: true })
+      const update = await h.provider.sync(initial.cursor, { folder: 'inbox', limit: 100 })
+      const changed = update.messages.find((message) => message.id === h.rootId)!
+      expect(changed.isRead).toBe(true)
+      expect({ subject: changed.subject, from: changed.from, receivedAt: changed.receivedAt })
+        .toEqual({ subject: original.subject, from: original.from, receivedAt: original.receivedAt })
     } finally { await h.close() }
   })
 

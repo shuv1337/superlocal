@@ -366,7 +366,8 @@ export class OutlookProvider implements InboxProvider {
     for (let index = 0; index < unique.length; index += 5) {
       const settled = await Promise.allSettled(
         unique.slice(index, index + 5).map((message) =>
-          search ? this.getMessage(message.id) : this.hydrate(message, folderHint),
+          // Delta updates may carry only the changed properties; a full record always includes receivedDateTime.
+          search || !('receivedDateTime' in message) ? this.getMessage(message.id) : this.hydrate(message, folderHint),
         ),
       )
       for (const result of settled) {
