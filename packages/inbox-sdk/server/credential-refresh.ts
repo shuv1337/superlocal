@@ -1,5 +1,5 @@
 import { CredentialError, type CredentialContext, type ProviderDefinition } from '../src/contracts'
-import type { GoogleOAuthConfig } from './google-oauth'
+import type { GoogleOAuthConfig, MicrosoftOAuthConfig } from './google-oauth'
 import { ProviderError, providerJson } from './sdk/types'
 
 export async function refreshOAuthCredentials(
@@ -16,6 +16,7 @@ export async function refreshOAuthCredentials(
     grant_type: 'refresh_token', refresh_token: credentials.refreshToken, client_id: credentials.clientId,
   })
   if (typeof credentials.clientSecret === 'string') body.set('client_secret', credentials.clientSecret)
+  if (typeof credentials.scope === 'string') body.set('scope', credentials.scope)
   const tenant = typeof credentials.tenantId === 'string' ? credentials.tenantId : 'common'
   const url = provider === 'gmail'
     ? 'https://oauth2.googleapis.com/token'
@@ -63,6 +64,29 @@ export function createGoogleCredentialRefresh(
     }
     return refreshOAuthCredentials('gmail', { ...credentials,
       ...(identity ? { clientId: config!.clientId, clientSecret: config!.clientSecret } : {}),
+      ...(fetcher ? { fetch: fetcher } : {}),
+    }, signal, now)
+  }
+}
+
+export function createMicrosoftCredentialRefresh(
+  config: MicrosoftOAuthConfig | undefined,
+  fetcher?: typeof fetch,
+  now: () => number = Date.now,
+): ProviderDefinition['refresh'] {
+  return async (credentials, signal, context) => {
+    const identity = context?.connection.identity
+    if (context && context.connection.providerId !== 'outlook') {
+      throw new CredentialError('unavailable', 'Microsoft credential refresh requires an Outlook connection.')
+    }
+    const tenantId = config?.tenantId.toLowerCase()
+    if (identity && (!config?.clientId || !config.clientSecret ||
+      identity.issuer !== `https://login.microsoftonline.com/${tenantId}/v2.0` || identity.registrationId !== config.clientId)) {
+      throw new CredentialError('unavailable', 'The Microsoft client registration for this connection is unavailable.')
+    }
+    return refreshOAuthCredentials('outlook', { ...credentials,
+      ...(identity ? { clientId: config!.clientId, clientSecret: config!.clientSecret, tenantId,
+        ...(config!.scopes ? { scope: config!.scopes.join(' ') } : {}) } : {}),
       ...(fetcher ? { fetch: fetcher } : {}),
     }, signal, now)
   }

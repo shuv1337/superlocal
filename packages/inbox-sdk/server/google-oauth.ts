@@ -11,9 +11,14 @@ export interface GoogleOAuthConfig {
   scopes?: string[]
 }
 
+export interface MicrosoftOAuthConfig extends GoogleOAuthConfig {
+  /** Directory (tenant) GUID. Tenant-specific issuers keep ID-token issuer validation exact. */
+  tenantId: string
+}
+
 export interface OAuthAttempt {
   id: string
-  providerId: 'gmail'
+  providerId: 'gmail' | 'outlook'
   status: 'pending' | 'authorizing' | 'exchanging' | 'completed' | 'failed'
   expiresAt: string
   connectionId: string | null
@@ -25,7 +30,7 @@ export interface OAuthCompletion { connection: Connection; setCookie: string }
 
 export interface GoogleOAuthCoordinatorOptions {
   database: Database
-  config: GoogleOAuthConfig
+  config: GoogleOAuthConfig | MicrosoftOAuthConfig
   now: () => number
   fetch?: typeof globalThis.fetch
   encrypt: (plaintext: string, owner: string, id: string) => string
@@ -61,8 +66,71 @@ type AttemptSecrets = {
   connections?: Array<{ id: string; identity: ConnectionIdentity; generation: number; status: Connection['status'] }>
 }
 
-const callbackPath = '/v1/oauth/google/callback'
-const issuer = 'https://accounts.google.com'
+/** Per-identity-provider differences; attempt storage, binding and connection rules are shared. */
+interface OAuthProfile {
+  providerId: OAuthAttempt['providerId']
+  label: string
+  slug: 'google' | 'microsoft'
+  issuer: string
+  metadata: oidc.ServerMetadata
+  defaultScopes: string[]
+  requiredScopes: string[]
+  authorizationParameters: Record<string, string>
+  grantedScopesValid(granted: string[]): boolean
+  /** Confirms the verified subject with the provider when the access token can reach a userinfo endpoint. */
+  confirmUser?(config: oidc.Configuration, accessToken: string, subject: string): Promise<boolean>
+}
+
+const tenantGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const googleProfile: OAuthProfile = {
+  providerId: 'gmail', label: 'Google', slug: 'google', issuer: 'https://accounts.google.com',
+  metadata: {
+    issuer: 'https://accounts.google.com',
+    authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+    token_endpoint: 'https://oauth2.googleapis.com/token',
+    jwks_uri: 'https://www.googleapis.com/oauth2/v3/certs',
+    userinfo_endpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_methods_supported: ['client_secret_post'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    code_challenge_methods_supported: ['S256'],
+  },
+  defaultScopes: ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly'],
+  requiredScopes: ['openid', 'email'],
+  authorizationParameters: { access_type: 'offline', prompt: 'consent' },
+  grantedScopesValid: granted => granted.includes('openid') &&
+    (granted.includes('email') || granted.includes('https://www.googleapis.com/auth/userinfo.email')),
+  async confirmUser(config, accessToken, subject) {
+    const userInfo = await oidc.fetchUserInfo(config, accessToken, subject)
+    return bounded(userInfo.email, 320) && /^[^@\s]+@[^@\s]+$/.test(userInfo.email) && userInfo.email_verified === true
+  },
+}
+
+function microsoftProfile(tenantId: string): OAuthProfile {
+  const base = `https://login.microsoftonline.com/${tenantId}`
+  return {
+    providerId: 'outlook', label: 'Microsoft', slug: 'microsoft', issuer: `${base}/v2.0`,
+    metadata: {
+      issuer: `${base}/v2.0`,
+      authorization_endpoint: `${base}/oauth2/v2.0/authorize`,
+      token_endpoint: `${base}/oauth2/v2.0/token`,
+      jwks_uri: `${base}/discovery/v2.0/keys`,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      token_endpoint_auth_methods_supported: ['client_secret_post'],
+      id_token_signing_alg_values_supported: ['RS256'],
+      code_challenge_methods_supported: ['S256'],
+    },
+    defaultScopes: ['openid', 'email', 'offline_access', 'https://graph.microsoft.com/User.Read', 'https://graph.microsoft.com/Mail.Read'],
+    requiredScopes: ['openid', 'offline_access'],
+    authorizationParameters: { prompt: 'select_account' },
+    // Microsoft omits OpenID scopes from the Graph token's echo; the signed ID token already proved the subject.
+    grantedScopesValid: () => true,
+  }
+}
+
 const attemptLifetime = 10 * 60_000
 const randomToken = /^[A-Za-z0-9_-]{43}$/
 const scopeToken = /^[\x21\x23-\x5b\x5d-\x7e]+$/
@@ -74,16 +142,28 @@ function bounded(value: unknown, max: number): value is string {
     value.trim() === value && !/[\x00-\x1f\x7f]/.test(value)
 }
 
-function failure(): InboxError {
-  return new InboxError('OAUTH_FAILED', 'The Google connection attempt could not be completed.', 400)
-}
-
-export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOptions): {
+type Coordinator = {
   start(owner: string, input?: { connectionId?: string }): Promise<OAuthAttempt>
   attempt(owner: string, id: string): Promise<OAuthAttempt>
   authorize(id: string, ticket: string): Promise<OAuthRedirect>
   complete(callbackUrl: string, cookieHeader: string, currentOwner?: string): Promise<OAuthCompletion>
-} {
+}
+
+export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOptions): Coordinator {
+  return createOAuthCoordinator(googleProfile, options)
+}
+
+export function createMicrosoftOAuthCoordinator(options: GoogleOAuthCoordinatorOptions & { config: MicrosoftOAuthConfig }): Coordinator {
+  if (!tenantGuid.test(options.config.tenantId ?? '')) {
+    throw new InboxError('VALIDATION', 'Microsoft OAuth requires the directory (tenant) ID GUID.')
+  }
+  return createOAuthCoordinator(microsoftProfile(options.config.tenantId.toLowerCase()), options)
+}
+
+function createOAuthCoordinator(profile: OAuthProfile, options: GoogleOAuthCoordinatorOptions): Coordinator {
+  const { issuer, providerId, slug } = profile
+  const callbackPath = `/v1/oauth/${slug}/callback`
+  const failure = () => new InboxError('OAUTH_FAILED', `The ${profile.label} connection attempt could not be completed.`, 400)
   const { database: db, now, encrypt, decrypt, finish, checkConnection, listConnections } = options
   const { clientId, clientSecret, redirectUri } = options.config
   const transport = options.fetch ?? globalThis.fetch
@@ -96,30 +176,19 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
     if (redirect.href !== redirectUri || !redirectUri.endsWith(callbackPath) || redirect.username || redirect.password || redirect.search || redirect.hash ||
       !redirect.pathname.endsWith(callbackPath) || /[;\s]/.test(redirect.pathname) ||
       (redirect.protocol !== 'https:' && !(redirect.protocol === 'http:' && loopback))) throw failure()
-    const requested = options.config.scopes ?? ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly']
+    const requested = options.config.scopes ?? profile.defaultScopes
     if (!Array.isArray(requested) || requested.length > 64 ||
       requested.some(scope => !bounded(scope, 2048) || !scopeToken.test(scope)) ||
-      !requested.includes('openid') || !requested.includes('email') || requested.join(' ').length > 8192) throw failure()
+      profile.requiredScopes.some(scope => !requested.includes(scope)) || requested.join(' ').length > 8192) throw failure()
     scopes = [...new Set(requested)]
   } catch {
-    throw new InboxError('VALIDATION', 'Google OAuth requires a valid client registration, callback URL, and OpenID email scopes.')
+    throw new InboxError('VALIDATION', `${profile.label} OAuth requires a valid client registration, callback URL, and OpenID scopes (${profile.requiredScopes.join(', ')}).`)
   }
   const registration = hash(JSON.stringify([clientId, redirectUri, scopes]))
   const baseUrl = redirectUri.slice(0, -callbackPath.length)
 
   function configuration(): oidc.Configuration {
-    const config = new oidc.Configuration({
-      issuer,
-      authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
-      token_endpoint: 'https://oauth2.googleapis.com/token',
-      jwks_uri: 'https://www.googleapis.com/oauth2/v3/certs',
-      userinfo_endpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['client_secret_post'],
-      id_token_signing_alg_values_supported: ['RS256'],
-      code_challenge_methods_supported: ['S256'],
-    }, clientId, {
+    const config = new oidc.Configuration(profile.metadata, clientId, {
       client_secret: clientSecret,
       id_token_signed_response_alg: 'RS256',
       [oidc.clockTolerance]: 0,
@@ -160,7 +229,7 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
   }
 
   function attemptDTO(row: AttemptRow): OAuthAttempt {
-    return { id: row.id, providerId: 'gmail', status: row.status,
+    return { id: row.id, providerId, status: row.status,
       expiresAt: new Date(row.expires_at).toISOString(), connectionId: row.connection_id }
   }
 
@@ -174,7 +243,7 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
   }
 
   function bindingCookie(id: string, value: string, maxAge: number): string {
-    return `inbox_google_oauth_${id}=${value}; Path=${redirect.pathname}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` +
+    return `inbox_${slug}_oauth_${id}=${value}; Path=${redirect.pathname}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` +
       (redirect.protocol === 'https:' ? '; Secure' : '') +
       (maxAge === 0 ? '; Expires=Thu, 01 Jan 1970 00:00:00 GMT' : '')
   }
@@ -185,19 +254,19 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
       if (!input || typeof input !== 'object' || Array.isArray(input) ||
         Object.keys(input).some(key => key !== 'connectionId') ||
         (input.connectionId !== undefined && !bounded(input.connectionId, 255))) {
-        throw new InboxError('VALIDATION', 'Invalid Google connection input.')
+        throw new InboxError('VALIDATION', `Invalid ${profile.label} connection input.`)
       }
       let identity: ConnectionIdentity | null = null
       let generation: number | undefined
       const connections = input.connectionId === undefined ? (await listConnections(owner))
-        .filter(connection => connection.providerId === 'gmail' && connection.identity?.issuer === issuer && connection.identity.registrationId === clientId)
+        .filter(connection => connection.providerId === providerId && connection.identity?.issuer === issuer && connection.identity.registrationId === clientId)
         .map(connection => ({ id: connection.id, identity: { ...connection.identity! }, generation: connection.generation, status: connection.status })) : undefined
       if (input.connectionId !== undefined) {
         const connection = await checkConnection(owner, input.connectionId)
-        if (connection.id !== input.connectionId || connection.providerId !== 'gmail' ||
+        if (connection.id !== input.connectionId || connection.providerId !== providerId ||
           !connection.identity || connection.identity.issuer !== issuer || !bounded(connection.identity.subject, 255) ||
           connection.identity.registrationId !== clientId) {
-          throw new InboxError('VALIDATION', 'This connection cannot be reconnected with this Google registration.')
+          throw new InboxError('VALIDATION', `This connection cannot be reconnected with this ${profile.label} registration.`)
         }
         identity = { ...connection.identity }
         generation = connection.generation
@@ -213,8 +282,8 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
           (id,owner,registration,status,expires_at,reconnect_connection_id,secrets,ticket_hash,state_hash)
           VALUES (?,?,?,'pending',?,?,?,?,?)`).run(id, owner, registration, expiresAt, input.connectionId ?? null,
           encrypt(JSON.stringify(secrets), owner, id), hash(handoff), hash(secrets.state))
-        return { id, providerId: 'gmail', status: 'pending', expiresAt: new Date(expiresAt).toISOString(),
-          connectionId: null, authorizeUrl: `${baseUrl}/v1/oauth/google/authorize/${id}?ticket=${handoff}` }
+        return { id, providerId, status: 'pending', expiresAt: new Date(expiresAt).toISOString(),
+          connectionId: null, authorizeUrl: `${baseUrl}/v1/oauth/${slug}/authorize/${id}?ticket=${handoff}` }
       } catch { throw failure() }
     },
 
@@ -222,7 +291,7 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
       ownerId(owner)
       if (!bounded(id, 128)) throw new InboxError('NOT_FOUND', 'OAuth attempt not found.', 404)
       expire()
-      const row = db.query<AttemptRow, [string, string]>('SELECT * FROM sdk_oauth_attempts WHERE owner=? AND id=?').get(owner, id)
+      const row = db.query<AttemptRow, [string, string, string]>('SELECT * FROM sdk_oauth_attempts WHERE owner=? AND id=? AND registration=?').get(owner, id, registration)
       if (!row) throw new InboxError('NOT_FOUND', 'OAuth attempt not found.', 404)
       return attemptDTO(row)
     },
@@ -252,8 +321,7 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
           nonce: secrets.nonce,
           code_challenge: await oidc.calculatePKCECodeChallenge(secrets.verifier),
           code_challenge_method: 'S256',
-          access_type: 'offline',
-          prompt: 'consent',
+          ...profile.authorizationParameters,
         }).href
         const active = db.query<{ status: string }, [string, number]>(
           "SELECT status FROM sdk_oauth_attempts WHERE id=? AND expires_at>? AND status='authorizing'").get(claimed.id, now())
@@ -287,7 +355,7 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
         claimed = row
         if (currentOwner !== undefined && (!bounded(currentOwner, 1024) || currentOwner !== row.owner)) throw failure()
         if (typeof cookieHeader !== 'string' || cookieHeader.length > 16_384 || /[\x00-\x1f\x7f]/.test(cookieHeader)) throw failure()
-        const cookieName = `inbox_google_oauth_${row.id}`
+        const cookieName = `inbox_${slug}_oauth_${row.id}`
         const bindings = cookieHeader.split(';').map(part => part.trim()).filter(part => part.split('=', 1)[0] === cookieName)
         const binding = bindings[0]?.slice(cookieName.length + 1)
         if (bindings.length !== 1 || !binding || !randomToken.test(binding) || !row.binding_hash ||
@@ -306,17 +374,15 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
         const tokenTime = now()
         const claims = tokens.claims()
         if (!claims || !bounded(claims.sub, 255) || claims.iss !== issuer || claims.exp * 1000 <= tokenTime ||
-          !bounded(tokens.access_token, 16_384) || tokens.token_type !== 'bearer' ||
+          !bounded(tokens.access_token, 16_384) || tokens.token_type?.toLowerCase() !== 'bearer' ||
           (tokens.refresh_token !== undefined && !bounded(tokens.refresh_token, 16_384)) ||
           typeof tokens.expires_in !== 'number' || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) throw failure()
         const expiresAt = new Date(tokenTime + tokens.expires_in * 1000).toISOString()
         if (tokens.scope !== undefined && !bounded(tokens.scope, 8192)) throw failure()
         const grantedScopes = tokens.scope === undefined ? scopes : tokens.scope.split(' ')
         if (grantedScopes.length > 64 || grantedScopes.some(scope => !bounded(scope, 2048) || !scopeToken.test(scope)) ||
-          !grantedScopes.includes('openid') ||
-          !(grantedScopes.includes('email') || grantedScopes.includes('https://www.googleapis.com/auth/userinfo.email'))) throw failure()
-        const userInfo = await oidc.fetchUserInfo(config, tokens.access_token, claims.sub)
-        if (!bounded(userInfo.email, 320) || !/^[^@\s]+@[^@\s]+$/.test(userInfo.email) || userInfo.email_verified !== true) throw failure()
+          !profile.grantedScopesValid(grantedScopes)) throw failure()
+        if (profile.confirmUser && !await profile.confirmUser(config, tokens.access_token, claims.sub)) throw failure()
         const identity: ConnectionIdentity = { issuer, subject: claims.sub, registrationId: clientId }
         let targetId = row.reconnect_connection_id ?? undefined
         let expectedGeneration = secrets.generation
@@ -324,11 +390,11 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
           const target = await checkConnection(row.owner, row.reconnect_connection_id)
           if (!secrets.identity || secrets.identity.issuer !== identity.issuer || secrets.identity.subject !== identity.subject ||
             secrets.identity.registrationId !== identity.registrationId || target.id !== row.reconnect_connection_id ||
-            target.providerId !== 'gmail' || target.identity?.issuer !== identity.issuer ||
+            target.providerId !== providerId || target.identity?.issuer !== identity.issuer ||
             target.identity.subject !== identity.subject || target.identity.registrationId !== identity.registrationId || target.generation !== secrets.generation) throw failure()
         } else {
           const previous = secrets.connections?.find(connection => connection.identity.subject === identity.subject && connection.identity.issuer === identity.issuer && connection.identity.registrationId === identity.registrationId)
-          const current = (await listConnections(row.owner)).find(connection => connection.providerId === 'gmail' && connection.identity?.subject === identity.subject && connection.identity.issuer === identity.issuer && connection.identity.registrationId === identity.registrationId)
+          const current = (await listConnections(row.owner)).find(connection => connection.providerId === providerId && connection.identity?.subject === identity.subject && connection.identity.issuer === identity.issuer && connection.identity.registrationId === identity.registrationId)
           if (previous) {
             if (previous.status !== 'connected' || current?.id !== previous.id || current.status !== 'connected' || current.generation !== previous.generation) throw failure()
             targetId = previous.id
@@ -354,30 +420,41 @@ export function createGoogleOAuthCoordinator(options: GoogleOAuthCoordinatorOpti
   }
 }
 
-export function createGoogleOAuthHost(options: {
+type OAuthHostOptions<Config> = {
   inbox: Inbox
   database: Database
   encryptionKey: string
-  config: GoogleOAuthConfig
+  config: Config
   now?: () => number
   fetch?: typeof globalThis.fetch
-}): ReturnType<typeof createGoogleOAuthCoordinator> {
+}
+
+export function createGoogleOAuthHost(options: OAuthHostOptions<GoogleOAuthConfig>): Coordinator {
+  return oauthHost(options, 'gmail', 'Google', coordinator => createGoogleOAuthCoordinator(coordinator))
+}
+
+export function createMicrosoftOAuthHost(options: OAuthHostOptions<MicrosoftOAuthConfig>): Coordinator {
+  return oauthHost(options, 'outlook', 'Microsoft', coordinator => createMicrosoftOAuthCoordinator({ ...coordinator, config: options.config }))
+}
+
+function oauthHost<Config extends GoogleOAuthConfig>(options: OAuthHostOptions<Config>, providerId: OAuthAttempt['providerId'], label: string,
+  create: (options: GoogleOAuthCoordinatorOptions) => Coordinator): Coordinator {
   const { inbox } = options
-  if (!inbox.providers().some(provider => provider.id === 'gmail')) {
-    throw new InboxError('UNSUPPORTED_PROVIDER', 'The Gmail provider is not enabled.', 409)
+  if (!inbox.providers().some(provider => provider.id === providerId)) {
+    throw new InboxError('UNSUPPORTED_PROVIDER', `The ${providerId} provider is not enabled.`, 409)
   }
   const crypto = createCredentialCrypto({ NODE_ENV: 'production', CREDENTIAL_ENCRYPTION_KEY: options.encryptionKey })
-  return createGoogleOAuthCoordinator({ database: options.database, config: options.config, now: options.now ?? Date.now, fetch: options.fetch,
+  return create({ database: options.database, config: options.config, now: options.now ?? Date.now, fetch: options.fetch,
     encrypt: crypto.encryptCredential, decrypt: crypto.decryptCredential,
     checkConnection: (owner, id) => inbox.connection(owner, id),
     listConnections: owner => inbox.connections(owner),
     finish: async (owner, credentials, identity, reconnectConnectionId, expectedGeneration) => {
-      if (reconnectConnectionId === undefined) return inbox.createConnection(owner, { providerId: 'gmail', credentials }, identity)
+      if (reconnectConnectionId === undefined) return inbox.createConnection(owner, { providerId, credentials }, identity)
       const connection = await inbox.connection(owner, reconnectConnectionId)
-      if (connection.id !== reconnectConnectionId || connection.providerId !== 'gmail' ||
+      if (connection.id !== reconnectConnectionId || connection.providerId !== providerId ||
         !connection.identity || connection.identity.issuer !== identity.issuer ||
         connection.identity.subject !== identity.subject || connection.identity.registrationId !== identity.registrationId) {
-        throw new InboxError('ACCOUNT_MISMATCH', 'Reconnect must authorize the original Google identity.', 409)
+        throw new InboxError('ACCOUNT_MISMATCH', `Reconnect must authorize the original ${label} identity.`, 409)
       }
       if (connection.sourceIds.length !== 1) throw new InboxError('UNSUPPORTED_OPERATION', 'This connection requires explicit source selection.', 409)
       if (expectedGeneration === undefined) throw new InboxError('CONFLICT', 'Reconnect is missing its authorization generation.', 409)

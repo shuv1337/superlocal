@@ -36,6 +36,7 @@ export interface LocalConfig {
     gmail: ProviderConfig & { oauth: { clientId: SecretSource; clientSecret: SecretSource; scopes: string[] } }
     inbound: ProviderConfig
     imap: ProviderConfig & { servers: ImapHostPreset[] }
+    outlook: ProviderConfig & { oauth: { clientId: SecretSource; clientSecret: SecretSource; tenantId: SecretSource; scopes: string[] } }
   } & Record<string, ProviderConfig>
 }
 
@@ -147,8 +148,18 @@ function defaults() {
       } },
       inbound: { enabled: false },
       imap: { enabled: true, servers: [] },
-      ...Object.fromEntries(PROVIDER_IDS.filter(id => !['mock', 'gmail', 'inbound', 'imap'].includes(id)).map(id => [id, { enabled: false }])),
+      outlook: { enabled: false, oauth: defaultOutlookOAuth() },
+      ...Object.fromEntries(PROVIDER_IDS.filter(id => !['mock', 'gmail', 'inbound', 'imap', 'outlook'].includes(id)).map(id => [id, { enabled: false }])),
     },
+  }
+}
+
+function defaultOutlookOAuth() {
+  return {
+    clientId: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' }, clientSecret: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_SECRET' },
+    tenantId: { env: 'SUPERLOCAL_MICROSOFT_TENANT_ID' },
+    scopes: ['openid', 'email', 'profile', 'offline_access', 'https://graph.microsoft.com/User.Read',
+      'https://graph.microsoft.com/Mail.ReadWrite', 'https://graph.microsoft.com/Mail.Send'],
   }
 }
 
@@ -183,7 +194,11 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
   const inbound = record(providers.inbound, 'providers.inbound', ['enabled'])
   const imap = record(providers.imap ?? { enabled: true, servers: [] }, 'providers.imap', ['enabled', 'servers'])
   // Built-in providers without host-specific settings: optional keys, disabled unless configured. Older private files omit them.
-  const others = Object.fromEntries(PROVIDER_IDS.filter(id => !['mock', 'gmail', 'inbound', 'imap'].includes(id)).map(id => {
+  const outlook = record(providers.outlook ?? { enabled: false }, 'providers.outlook', ['enabled', 'oauth'])
+  const outlookOAuth = record(outlook.oauth ?? defaultOutlookOAuth(), 'providers.outlook.oauth', ['clientId', 'clientSecret', 'tenantId', 'scopes'])
+  if (!Array.isArray(outlookOAuth.scopes) || outlookOAuth.scopes.length > 64 || outlookOAuth.scopes.some(scope => typeof scope !== 'string' || !/^[\x21\x23-\x5b\x5d-\x7e]{1,2048}$/.test(scope)) ||
+    !outlookOAuth.scopes.includes('openid') || !outlookOAuth.scopes.includes('offline_access') || outlookOAuth.scopes.join(' ').length > 8192) invalid('providers.outlook.oauth.scopes')
+  const others = Object.fromEntries(PROVIDER_IDS.filter(id => !['mock', 'gmail', 'inbound', 'imap', 'outlook'].includes(id)).map(id => {
     const entry = record(providers[id] ?? { enabled: false }, `providers.${id}`, ['enabled'])
     return [id, { enabled: bool(entry.enabled, `providers.${id}.enabled`) }]
   }))
@@ -223,7 +238,11 @@ export function loadLocalConfig(options: { configPath?: string; environment?: No
     web: { port: webPort, origin: webOrigin, allowedOrigins: authMethod === 'google' ? [webOrigin] : [...new Set([webOrigin, `http://localhost:${webPort}`, `http://127.0.0.1:${webPort}`, ...allowedOrigins])] },
     backend: { port: apiPort }, auth: { method: authMethod, sessionHours: auth.sessionHours, allowedEmails }, allowProviderWrites: policy[input.mode],
     providers: { ...others, mock: { enabled: enabledMock }, inbound: { enabled: bool(inbound.enabled, 'providers.inbound.enabled') },
-      imap: { enabled: bool(imap.enabled, 'providers.imap.enabled'), servers: imapServers }, gmail: {
+      imap: { enabled: bool(imap.enabled, 'providers.imap.enabled'), servers: imapServers },
+      outlook: { enabled: bool(outlook.enabled, 'providers.outlook.enabled'), oauth: {
+        clientId: secretSource(outlookOAuth.clientId, 'providers.outlook.oauth.clientId'), clientSecret: secretSource(outlookOAuth.clientSecret, 'providers.outlook.oauth.clientSecret'),
+        tenantId: secretSource(outlookOAuth.tenantId, 'providers.outlook.oauth.tenantId'), scopes: outlookOAuth.scopes as string[],
+      } }, gmail: {
       enabled: bool(gmail.enabled, 'providers.gmail.enabled'), oauth: {
         clientId: secretSource(oauth.clientId, 'providers.gmail.oauth.clientId'), clientSecret: secretSource(oauth.clientSecret, 'providers.gmail.oauth.clientSecret'), scopes: oauth.scopes as string[],
       },

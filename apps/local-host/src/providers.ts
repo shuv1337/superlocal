@@ -1,5 +1,5 @@
-import { createGoogleCredentialRefresh, createGoogleOAuthApi, createGoogleOAuthHost, InboxError, verifyGoogleCredentials,
-  type GoogleOAuthConfig, type Inbox, type ProviderCredentialHelp, type ProviderDefinition, type ProviderOnboarding, type ProviderOnboardingField, type ProviderOnboardingOption } from 'inbox-sdk'
+import { createGoogleCredentialRefresh, createGoogleOAuthApi, createGoogleOAuthHost, createMicrosoftCredentialRefresh, createMicrosoftOAuthApi,
+  createMicrosoftOAuthHost, InboxError, verifyGoogleCredentials, type GoogleOAuthConfig, type Inbox, type MicrosoftOAuthConfig, type ProviderCredentialHelp, type ProviderDefinition, type ProviderOnboarding, type ProviderOnboardingField, type ProviderOnboardingOption } from 'inbox-sdk'
 import type { InboxApiOptions } from 'inbox-sdk/http'
 import { builtInProviders } from 'inbox-sdk/providers'
 import { createHash } from 'node:crypto'
@@ -162,21 +162,27 @@ type Flow = (definition: ProviderDefinition) => HostProviderRegistration
 export function createRealRegistrations(config: LocalConfig, runtime: ReturnType<typeof openLocalRuntime>, environment: NodeJS.ProcessEnv) {
   let googleConfig: GoogleOAuthConfig | undefined
 
-  const google: Flow = base => {
-    const clientId = resolveSecret(config.providers.gmail.oauth.clientId, environment)
-    const clientSecret = resolveSecret(config.providers.gmail.oauth.clientSecret, environment)
-    const callbackPath = '/v1/oauth/google/callback'
-    if (clientId && clientSecret) googleConfig = { clientId, clientSecret, scopes: config.providers.gmail.oauth.scopes, redirectUri: `${config.web.origin}${callbackPath}` }
-    let coordinator: ReturnType<typeof createGoogleOAuthHost> | undefined
+  type Coordinator = ReturnType<typeof createGoogleOAuthHost>
+  /** Host-managed OAuth: the SDK coordinator owns attempts and tokens; the host pins origin and resumes onboarding. */
+  const oauthFlow = (options: {
+    slug: 'google' | 'microsoft'
+    oauthConfig: GoogleOAuthConfig | undefined
+    setupMessage: string
+    scopes: string[]
+    refresh: ProviderDefinition['refresh']
+    host(inbox: Inbox): Coordinator
+    api: typeof createGoogleOAuthApi
+  }): Flow => base => {
+    const callbackPath = `/v1/oauth/${options.slug}/callback`
+    let coordinator: Coordinator | undefined
     const oauth = (inbox: Inbox) => {
-      if (!googleConfig) throw new InboxError('HOST_PROVIDER_NOT_READY', 'Configure the Gmail OAuth client in superlocal.local.json or its explicitly named environment variables, then restart.', 409)
-      return coordinator ??= createGoogleOAuthHost({ inbox, database: runtime.database, encryptionKey: runtime.encryptionKey, config: googleConfig })
+      if (!options.oauthConfig) throw new InboxError('HOST_PROVIDER_NOT_READY', `Configure the ${base.name} OAuth client in superlocal.local.json or its explicitly named environment variables, then restart.`, 409)
+      return coordinator ??= options.host(inbox)
     }
-    const definition = { ...pinned(base), scopes: config.providers.gmail.oauth.scopes, refresh: createGoogleCredentialRefresh(googleConfig) }
+    const definition = { ...pinned(base), scopes: options.scopes, refresh: options.refresh }
     return {
       definition,
-      descriptor: describeProvider(definition, { ready: !!googleConfig,
-        setupMessage: `Set providers.${base.id}.oauth.clientId and clientSecret in superlocal.local.json (or their explicit environment references), register web.origin + ${callbackPath} with Google, then restart.` }),
+      descriptor: describeProvider(definition, { ready: !!options.oauthConfig, setupMessage: options.setupMessage }),
       async connect(inbox, owner, _credentials, origin) {
         if (origin !== config.web.origin) throw new InboxError('HOST_OAUTH_ORIGIN_REQUIRED', 'Open the configured web.origin before starting OAuth so its session and callback stay on the same origin.', 409)
         const attempt = await oauth(inbox).start(owner)
@@ -186,11 +192,12 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
         return { authorizeUrl: `${url.pathname}${url.search}` }
       },
       mount(inbox, authenticate) {
-        const api = createGoogleOAuthApi({ oauth: () => oauth(inbox), authenticate, allowedOrigins: config.web.allowedOrigins })
+        const api = options.api({ oauth: () => oauth(inbox), authenticate, allowedOrigins: config.web.allowedOrigins })
+        const authorizePath = new RegExp(`^/v1/oauth/${options.slug}/authorize/([^/%]+)$`)
         return {
-          matches: path => path.startsWith('/v1/oauth/google/'), callbackPath,
+          matches: path => path.startsWith(`/v1/oauth/${options.slug}/`), callbackPath,
           authorization: {
-            attemptId: path => /^\/v1\/oauth\/google\/authorize\/([^/%]+)$/.exec(path)?.[1],
+            attemptId: path => authorizePath.exec(path)?.[1],
             // The SDK's redirect handoff consumes a one-use ticket; check its owner before consumption.
             owns: (id, owner) => !!runtime.database.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sdk_oauth_attempts'").get() &&
               !!runtime.database.query('SELECT 1 FROM sdk_oauth_attempts WHERE id=? AND owner=?').get(id, owner),
@@ -216,6 +223,30 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
         }
       },
     }
+  }
+
+  const google: Flow = base => {
+    const clientId = resolveSecret(config.providers.gmail.oauth.clientId, environment)
+    const clientSecret = resolveSecret(config.providers.gmail.oauth.clientSecret, environment)
+    if (clientId && clientSecret) googleConfig = { clientId, clientSecret, scopes: config.providers.gmail.oauth.scopes, redirectUri: `${config.web.origin}/v1/oauth/google/callback` }
+    const oauthConfig = googleConfig
+    return oauthFlow({ slug: 'google', oauthConfig, scopes: config.providers.gmail.oauth.scopes, refresh: createGoogleCredentialRefresh(oauthConfig),
+      setupMessage: `Set providers.${base.id}.oauth.clientId and clientSecret in superlocal.local.json (or their explicit environment references), register web.origin + /v1/oauth/google/callback with Google, then restart.`,
+      host: inbox => createGoogleOAuthHost({ inbox, database: runtime.database, encryptionKey: runtime.encryptionKey, config: oauthConfig! }),
+      api: createGoogleOAuthApi })(base)
+  }
+
+  const microsoft: Flow = base => {
+    const settings = config.providers.outlook.oauth
+    const clientId = resolveSecret(settings.clientId, environment)
+    const clientSecret = resolveSecret(settings.clientSecret, environment)
+    const tenantId = resolveSecret(settings.tenantId, environment)
+    const oauthConfig: MicrosoftOAuthConfig | undefined = clientId && clientSecret && tenantId
+      ? { clientId, clientSecret, tenantId, scopes: settings.scopes, redirectUri: `${config.web.origin}/v1/oauth/microsoft/callback` } : undefined
+    return oauthFlow({ slug: 'microsoft', oauthConfig, scopes: settings.scopes, refresh: createMicrosoftCredentialRefresh(oauthConfig),
+      setupMessage: `Set providers.${base.id}.oauth.clientId, clientSecret and tenantId in superlocal.local.json (or their explicit environment references), register web.origin + /v1/oauth/microsoft/callback as a Web redirect URI in Microsoft Entra, then restart.`,
+      host: inbox => createMicrosoftOAuthHost({ inbox, database: runtime.database, encryptionKey: runtime.encryptionKey, config: oauthConfig! }),
+      api: createMicrosoftOAuthApi })(base)
   }
 
   const imap: Flow = base => {
@@ -284,7 +315,7 @@ export function createRealRegistrations(config: LocalConfig, runtime: ReturnType
     return { definition, descriptor: describeProvider(definition, { ready: false, setupMessage: `${base.name} sign-in is not available in this host yet.` }) }
   }
 
-  const flows: Record<string, Flow> = { gmail: google, imap }
+  const flows: Record<string, Flow> = { gmail: google, outlook: microsoft, imap }
   const registrations = builtInProviders.flatMap(base => {
     if (!config.providers[base.id]?.enabled) return []
     return [(flows[base.id] ?? (base.connection === 'oauth' ? unavailable : plain))(base)]

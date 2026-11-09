@@ -20,6 +20,7 @@ const callbackQuery = z.strictObject({
   error_description: z.string().max(4096).optional(), error_uri: z.string().max(4096).optional(),
   scope: z.string().max(8192).optional(), authuser: z.string().max(100).optional(),
   prompt: z.string().max(100).optional(), hd: name.optional(), iss: opaque.optional(),
+  session_state: opaque.optional(),
 })
 const connection = z.object({
   id, providerId: name, name: z.string(), status: z.enum(['connected', 'disconnected', 'reconnect_required']),
@@ -28,7 +29,7 @@ const connection = z.object({
   createdAt: z.string(),
 })
 const attempt = z.object({
-  id, providerId: z.literal('gmail'), status: z.enum(['pending', 'authorizing', 'exchanging', 'completed', 'failed']),
+  id, providerId: z.enum(['gmail', 'outlook']), status: z.enum(['pending', 'authorizing', 'exchanging', 'completed', 'failed']),
   expiresAt: z.string(), connectionId: id.nullable(), authorizeUrl: z.string().max(8192).nullable().optional(),
 })
 
@@ -110,6 +111,14 @@ export function createGoogleOAuthApi(options: {
   authenticate: InboxApiOptions['authenticate']
   allowedOrigins?: string[]
 }) {
+  return createOAuthApi('google', options)
+}
+
+export function createMicrosoftOAuthApi(options: Parameters<typeof createGoogleOAuthApi>[0]) {
+  return createOAuthApi('microsoft', options)
+}
+
+function createOAuthApi(slug: 'google' | 'microsoft', options: Parameters<typeof createGoogleOAuthApi>[0]) {
   const app = new Hono<Environment>()
   const origins = new Set(options.allowedOrigins ?? [])
   for (const origin of origins) {
@@ -180,13 +189,13 @@ export function createGoogleOAuthApi(options: {
     })
   }
 
-  route('GET', '/v1/oauth/google/authorize/:id', true, async c => {
+  route('GET', `/v1/oauth/${slug}/authorize/:id`, true, async c => {
     const input = query(c, authorizeQuery)
     const attemptId = validate(id, c.req.param('id'))
     const redirect = await options.oauth().authorize(attemptId, input.ticket)
     return c.newResponse(null, 302, { Location: redirect.location, 'Set-Cookie': redirect.setCookie })
   })
-  route('GET', '/v1/oauth/google/callback', true, async c => {
+  route('GET', `/v1/oauth/${slug}/callback`, true, async c => {
     query(c, callbackQuery)
     const owner = await currentOwner(c)
     const result = await options.oauth().complete(c.req.url, c.req.header('cookie') ?? '', owner)
@@ -194,12 +203,12 @@ export function createGoogleOAuthApi(options: {
       'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': result.setCookie,
     })
   })
-  route('POST', '/v1/connections/google/start', false, async c => {
+  route('POST', `/v1/connections/${slug}/start`, false, async c => {
     query(c, emptyQuery)
     const input = body(c)
     return c.json(validate(attempt, await options.oauth().start(c.get('owner'), input)))
   })
-  route('GET', '/v1/connections/google/attempts/:id', false, async c => {
+  route('GET', `/v1/connections/${slug}/attempts/:id`, false, async c => {
     query(c, emptyQuery)
     const attemptId = validate(id, c.req.param('id'))
     return c.json(validate(attempt.omit({ authorizeUrl: true }), await options.oauth().attempt(c.get('owner'), attemptId)))

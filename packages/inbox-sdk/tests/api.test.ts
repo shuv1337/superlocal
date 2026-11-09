@@ -13,7 +13,8 @@ import { createInboxApi } from '../src/http'
 import { createInboxClient } from '../src/client'
 import { pinnedMediaNetwork } from '../src/media'
 import { CredentialError, InboxError } from '../src/contracts'
-import { createGoogleOAuthHost, type GoogleOAuthConfig, type OAuthAttempt } from '../server/google-oauth'
+import { createGoogleOAuthHost, createMicrosoftOAuthCoordinator, type GoogleOAuthConfig, type OAuthAttempt } from '../server/google-oauth'
+import { createMicrosoftCredentialRefresh } from '../server/credential-refresh'
 import { createGoogleOAuthApi } from '../server/google-oauth-api'
 import { createGoogleOAuthClient } from '../server/google-client'
 import { createLocalHost } from '../../../apps/local-host/src/host'
@@ -58,7 +59,7 @@ import type {
   ProviderFolder, SendInput, SendResult, SyncContext, SyncCursor, SyncOptions, SyncResult,
 } from '../server/sdk/types'
 
-const TEMP_ROOT = '/private/var/folders/2j/6mslx1715gx8frsyn66sf1sh0000gn/T/opencode'
+const TEMP_ROOT = process.env.INBOX_TEST_TEMP_ROOT ?? '/private/var/folders/2j/6mslx1715gx8frsyn66sf1sh0000gn/T/opencode'
 const FULL = 'reference-mail'
 const RESTRICTED = 'reference-read-only'
 const DYNAMIC = 'unanticipated-provider-2026'
@@ -1717,15 +1718,16 @@ describe('IMAP host onboarding boundary', () => {
     expect(await (await session(mockHost)).providers()).toEqual([expect.objectContaining({ id: 'mock', name: mockDefinition.name, connection: 'none', ready: true, mailboxSelection: 'automatic', connectionIds: expect.any(Array) })])
     // Every built-in SDK provider is a configuration key: Outlook can be enabled without host changes; unknown ids are rejected.
     const raw = JSON.parse(await readFile(configPath, 'utf8'))
-    expect(raw.providers.outlook).toEqual({ enabled: false })
+    const outlookOAuth = raw.providers.outlook.oauth
+    expect(raw.providers.outlook).toEqual({ enabled: false, oauth: expect.objectContaining({ clientId: { env: 'SUPERLOCAL_MICROSOFT_CLIENT_ID' }, tenantId: { env: 'SUPERLOCAL_MICROSOFT_TENANT_ID' } }) })
     delete raw.providers.outlook
     await writeFile(configPath, JSON.stringify({ ...raw, providers: { ...raw.providers, inbound: { enabled: true }, gmail: { ...raw.providers.gmail, enabled: true },
       imap: { enabled: true, servers: [{ id: 'fixture-mail', name: 'Fixture Mail', imap: { host: 'imap.fixture-mail.invalid-tld.net', port: 993, secure: true }, sentCopy: 'server' }] } } }))
-    expect(loadLocalConfig({ configPath, environment: {} }).providers.outlook).toEqual({ enabled: false })
+    expect(loadLocalConfig({ configPath, environment: {} }).providers.outlook).toEqual({ enabled: false, oauth: outlookOAuth })
     await writeFile(configPath, JSON.stringify({ ...raw, providers: { ...raw.providers, outlook: { enabled: true }, inbound: { enabled: true }, gmail: { ...raw.providers.gmail, enabled: true },
       imap: { enabled: true, servers: [{ id: 'fixture-mail', name: 'Fixture Mail', imap: { host: 'imap.fixture-mail.invalid-tld.net', port: 993, secure: true }, sentCopy: 'server' }] } } }))
     const config = loadLocalConfig({ configPath, environment: {} })
-    expect(config.providers.outlook).toEqual({ enabled: true })
+    expect(config.providers.outlook).toEqual({ enabled: true, oauth: outlookOAuth })
     await writeFile(configPath, JSON.stringify({ ...raw, providers: { ...raw.providers, fastmail: { enabled: true } } }))
     expect(() => loadLocalConfig({ configPath, environment: {} })).toThrow()
     await writeFile(configPath, JSON.stringify({ ...raw, providers: { ...raw.providers, outlook: { enabled: 'yes' } } }))
@@ -1740,7 +1742,7 @@ describe('IMAP host onboarding boundary', () => {
     expect(listed.find(provider => provider.id === 'gmail')).toEqual(expect.objectContaining({ connection: 'oauth', ready: false, mailboxSelection: 'automatic',
       summary: definition('gmail').onboarding!.summary, actionLabel: definition('gmail').onboarding!.actionLabel, redirectNote: definition('gmail').onboarding!.redirectNote, setupMessage: expect.stringContaining('providers.gmail.oauth.clientId') }))
     expect(listed.find(provider => provider.id === 'gmail')!.fields).toBeUndefined()
-    expect(listed.find(provider => provider.id === 'outlook')).toEqual(expect.objectContaining({ connection: 'oauth', ready: false, actionLabel: 'Sign in with Microsoft', setupMessage: expect.stringContaining('Outlook') }))
+    expect(listed.find(provider => provider.id === 'outlook')).toEqual(expect.objectContaining({ connection: 'oauth', ready: false, actionLabel: 'Sign in with Microsoft', setupMessage: expect.stringContaining('providers.outlook.oauth.clientId') }))
     expect(listed.find(provider => provider.id === 'inbound')).toEqual(expect.objectContaining({ connection: 'credentials', ready: true, mailboxSelection: 'manual',
       summary: definition('inbound').onboarding!.summary, fields: definition('inbound').onboarding!.fields }))
     // Two IMAP presets: a select field carries per-preset labels, hidden fields and help; the SDK's generic field copy remains the base.
@@ -10526,6 +10528,69 @@ describe('pilot contract: server OAuth, configured mailboxes, and canonical mess
     expect((await owned.json() as Connection[]).map(item => item.id)).toEqual([account.connectionId!])
     await invalid(await mounted.request(`/pilot/v1/accounts/${account.id}`, { headers: { authorization: 'Bearer bob' } }), 404)
     await invalid(await mounted.request('/pilot/unknown', { headers: { authorization: 'Bearer alice' } }), 404)
+  })
+
+  test('Microsoft OAuth pins the tenant issuer, verifies the signed ID token and refreshes with the same registration', async () => {
+    const database = new Database(':memory:')
+    cleanup.push(async () => database.close())
+    const tenantId = '11111111-2222-4333-8444-555555555555'
+    const config = { clientId: 'fictional-microsoft-client', clientSecret: 'fictional-microsoft-secret', tenantId,
+      redirectUri: 'http://localhost:5178/v1/oauth/microsoft/callback', scopes: ['openid', 'email', 'offline_access', 'https://graph.microsoft.com/Mail.ReadWrite'] }
+    const authority = `https://login.microsoftonline.com/${tenantId}`
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'microsoft-test-key', alg: 'RS256', use: 'sig' }
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+    let challenge = '', nonce = '', issuer = `${authority}/v2.0`
+    let refreshBody: URLSearchParams | undefined
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init)
+      if (request.url === `${authority}/discovery/v2.0/keys`) return Response.json({ keys: [jwk] })
+      if (request.url !== `${authority}/oauth2/v2.0/token`) throw new Error('Unexpected network in isolated Microsoft fixture')
+      const body = new URLSearchParams(await request.text())
+      if (body.get('grant_type') === 'refresh_token') { refreshBody = body; return Response.json({ access_token: 'fictional-refreshed-token', token_type: 'Bearer', expires_in: 3600 }) }
+      if (body.get('client_secret') !== config.clientSecret || body.get('redirect_uri') !== config.redirectUri ||
+        createHash('sha256').update(body.get('code_verifier') ?? '').digest('base64url') !== challenge) return Response.json({ error: 'invalid_grant' }, { status: 400 })
+      const now = Math.floor(Date.now() / 1000)
+      const unsigned = `${encode({ alg: 'RS256', kid: jwk.kid, typ: 'JWT' })}.${encode({ iss: issuer, aud: config.clientId, sub: 'fictional-microsoft-subject', tid: tenantId, nonce, iat: now, exp: now + 3600 })}`
+      return Response.json({ access_token: 'fictional-graph-token', refresh_token: 'fictional-graph-refresh', token_type: 'Bearer', expires_in: 3600,
+        scope: 'https://graph.microsoft.com/Mail.ReadWrite', id_token: `${unsigned}.${sign('RSA-SHA256', Buffer.from(unsigned), privateKey).toString('base64url')}` })
+    }) as typeof fetch
+    const finished: Array<{ credentials: Record<string, unknown>; identity: unknown }> = []
+    const coordinator = createMicrosoftOAuthCoordinator({ database, config, now: Date.now, fetch: fetcher, encrypt: value => value, decrypt: value => value,
+      checkConnection: async () => { throw new Error('No reconnect in this fixture') }, listConnections: async () => [],
+      finish: async (_owner, credentials, identity) => {
+        finished.push({ credentials, identity })
+        return { id: 'fictional-connection', providerId: 'outlook', name: 'Outlook', status: 'connected', generation: 1, sourceIds: ['fictional-source'], identity, createdAt: new Date().toISOString() } as Connection
+      } })
+    const run = async () => {
+      const attempt = await coordinator.start('fictional-owner')
+      const handoff = new URL(attempt.authorizeUrl!)
+      expect(handoff.pathname).toBe(`/v1/oauth/microsoft/authorize/${attempt.id}`)
+      const redirect = await coordinator.authorize(attempt.id, handoff.searchParams.get('ticket')!)
+      const location = new URL(redirect.location)
+      expect(`${location.origin}${location.pathname}`).toBe(`${authority}/oauth2/v2.0/authorize`)
+      expect(location.searchParams.get('prompt')).toBe('select_account')
+      expect(location.searchParams.has('access_type')).toBe(false)
+      expect(location.searchParams.get('scope')).toBe(config.scopes.join(' '))
+      expect(redirect.setCookie).toStartWith(`inbox_microsoft_oauth_${attempt.id}=`)
+      challenge = location.searchParams.get('code_challenge')!
+      nonce = location.searchParams.get('nonce')!
+      return coordinator.complete(`${config.redirectUri}?code=fictional-code&state=${location.searchParams.get('state')}&session_state=fictional-session`,
+        redirect.setCookie.split(';')[0]!, 'fictional-owner')
+    }
+    await run()
+    const identity = { issuer: `${authority}/v2.0`, subject: 'fictional-microsoft-subject', registrationId: config.clientId }
+    expect(finished).toEqual([{ identity, credentials: expect.objectContaining({ accessToken: 'fictional-graph-token', refreshToken: 'fictional-graph-refresh' }) }])
+    // An ID token from another tenant's issuer never completes the connection.
+    issuer = 'https://login.microsoftonline.com/99999999-2222-4333-8444-555555555555/v2.0'
+    await expect(run()).rejects.toMatchObject({ code: 'OAUTH_FAILED' })
+    expect(finished).toHaveLength(1)
+    const context = { connection: { providerId: 'outlook', identity } } as never
+    expect(await createMicrosoftCredentialRefresh(config, fetcher)!({ refreshToken: 'fictional-graph-refresh' }, AbortSignal.timeout(5_000), context))
+      .toEqual(expect.objectContaining({ accessToken: 'fictional-refreshed-token' }))
+    expect(Object.fromEntries(refreshBody!)).toEqual(expect.objectContaining({ client_id: config.clientId, client_secret: config.clientSecret, refresh_token: 'fictional-graph-refresh', scope: config.scopes.join(' ') }))
+    await expect(createMicrosoftCredentialRefresh({ ...config, tenantId: '99999999-2222-4333-8444-555555555555' }, fetcher)!({ refreshToken: 'fictional-graph-refresh' }, AbortSignal.timeout(5_000), context))
+      .rejects.toBeInstanceOf(CredentialError)
   })
 
   test('HEAD and non-GET OAuth routes cannot consume capabilities, and a mounted callback preserves its full registered URI', async () => {
