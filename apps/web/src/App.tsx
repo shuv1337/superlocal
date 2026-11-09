@@ -1994,6 +1994,12 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
         );
         break;
       }
+      case "scrollReader": {
+        // Focus stays on the document, so the browser's own paging has no scroller to move.
+        const reader = document.querySelector<HTMLElement>(".message-view-scroll");
+        reader?.scrollBy({ top: intent.delta * Math.max(40, reader.clientHeight - 60), behavior: "smooth" });
+        break;
+      }
       case "filter":
         motion.prepare("switch");
         setMailFilter((value) => (value === intent.name ? null : intent.name));

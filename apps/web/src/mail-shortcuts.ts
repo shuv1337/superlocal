@@ -50,6 +50,7 @@ export type MailShortcut = (
   | { type: "openDrawer" }
   | { type: "openConversation"; drafts: boolean }
   | { type: "page"; delta: -1 | 1 }
+  | { type: "scrollReader"; delta: -1 | 1 }
   | { type: "filter"; name: "Unread" | "Starred" | "Important" | "No reply" }
   | { type: "navigateConversation"; delta: -1 | 1 }
   | { type: "reply"; mode: "reply" | "replyAll" | "forward"; popOut: boolean }
@@ -177,6 +178,8 @@ export function resolveMailShortcut(
       intent = { type: "openConversation", drafts: false };
     else if (event.key === " " && list)
       intent = { type: "page", delta: shift ? -1 : 1 };
+    else if ((event.key === "PageDown" || event.key === "PageUp") && (list || reader))
+      intent = { type: list ? "page" : "scrollReader", delta: event.key === "PageDown" ? 1 : -1 };
     else if (
       shift &&
       list &&

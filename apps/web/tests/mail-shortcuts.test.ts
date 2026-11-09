@@ -424,6 +424,11 @@ test("list movement, paging, splits, and opening retain their distinct contexts"
     delta: -1,
   });
   assert.equal(resolve(" ", { mode: "reader" }), null);
+  assert.deepEqual(resolve("PageDown"), { type: "page", delta: 1 });
+  assert.deepEqual(resolve("PageUp"), { type: "page", delta: -1 });
+  assert.deepEqual(resolve("PageDown", { mode: "reader" }), { type: "scrollReader", delta: 1 });
+  assert.deepEqual(resolve("PageUp", { mode: "reader" }), { type: "scrollReader", delta: -1 });
+  for (const context of [{ editing: true }, { modal: true }, { mode: "composer" }, { navigation: true }] as const) assert.equal(resolve("PageDown", context), null);
   assert.deepEqual(resolve("Tab"), { type: "split", delta: 1 });
   assert.deepEqual(resolve("Tab", {}, { shiftKey: true }), {
     type: "split",
