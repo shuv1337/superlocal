@@ -413,6 +413,8 @@ async function httpHarness(id: Exclude<BuiltIn, 'imap'>): Promise<ContractHarnes
         resultSizeEstimate: page.ids.length, ...(key ? { nextPageToken: key } : {}) })
       const next = new URL(url)
       next.searchParams.set('$skiptoken', key ?? '')
+      // Real Graph addresses folder listings in OData key form in its nextLinks.
+      if (!delta) next.pathname = next.pathname.replace(/\/mailFolders\/([^/]+)\/messages$/, "/mailFolders('$1')/messages")
       const deltaUrl = new URL(url)
       deltaUrl.search = '?$deltatoken=checkpoint'
       return json({ value: slice, ...(key ? { '@odata.nextLink': next.href } : delta ? { '@odata.deltaLink': deltaUrl.href } : {}) })
@@ -471,14 +473,15 @@ async function httpHarness(id: Exclude<BuiltIn, 'imap'>): Promise<ContractHarnes
         const created = `folder-${++serial}`; account.folders.set(created, body.displayName); return json({ id: created, displayName: body.displayName }, 201)
       }
       if (/^\/me\/mailFolders\/[^/]+$/.test(path) && method === 'DELETE') { account.folders.delete(path.split('/').at(-1)!); return new Response(null, { status: 204 }) }
-      const listing = /^\/me(?:\/mailFolders\/([^/]+))?\/messages(\/delta)?$/.exec(path)
+      const listing = /^\/me(?:\/mailFolders(?:\/([^/]+)|\('([^']+)'\)))?\/messages(\/delta)?$/.exec(path)
       if (listing && method === 'GET') {
-        const folder = listing[1] ? folderId(graphRole(listing[1]) ?? listing[1]) : undefined
+        const folderKey = listing[1] ?? listing[2]
+        const folder = folderKey ? folderId(graphRole(folderKey) ?? folderKey) : undefined
         if (url.searchParams.has('$deltatoken')) return json({ value: account.changes, '@odata.deltaLink': url.href })
         const thread = /conversationId eq '([^']+)'/.exec(url.searchParams.get('$filter') ?? '')?.[1]
         const values = selection(folder).filter((message) => !thread || message.conversationId === thread)
         const preference = /odata.maxpagesize=(\d+)/.exec(request.headers.get('prefer') ?? '')?.[1]
-        return paged(values, thread ? 1 : Number(preference ?? url.searchParams.get('$top') ?? 50), Boolean(listing[2]))
+        return paged(values, thread ? 1 : Number(preference ?? url.searchParams.get('$top') ?? 50), Boolean(listing[3]))
       }
       if (path === '/me/messages' && method === 'POST') {
         const created = rawSeed(accountId, `draft-${++serial}`, body.subject, { folder: 'drafts' })
@@ -488,6 +491,10 @@ async function httpHarness(id: Exclude<BuiltIn, 'imap'>): Promise<ContractHarnes
       if (match) {
         const message = account.messages.get(match[1]!)
         if (!message) return json({ error: { code: 'ErrorItemNotFound', message: 'Not found' } }, 404)
+        // contentId is a fileAttachment property; Graph rejects it in a $select on the base attachment type.
+        if (match[2]?.startsWith('attachments') && (url.searchParams.get('$select') ?? '').split(',').includes('contentId')) {
+          return json({ error: { code: 'BadRequest', message: "Could not find a property named 'contentId' on type 'microsoft.graph.attachment'." } }, 400)
+        }
         if (match[2] === 'attachments' && method === 'GET') return json({ value: message.attachments ?? [] })
         if (match[2]?.startsWith('attachments/')) {
           const attachmentId = match[2].split('/')[1]!

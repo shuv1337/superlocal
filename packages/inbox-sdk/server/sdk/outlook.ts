@@ -126,6 +126,9 @@ const MESSAGE_FIELDS = [
   'flag',
 ].join(',')
 
+// contentId exists only on fileAttachment; selecting it on the base attachment type is a Graph 400.
+const ATTACHMENT_FIELDS = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId'
+
 const GRAPH_FOLDERS: Partial<Record<MailFolder, string>> = {
   inbox: 'inbox',
   sent: 'sentitems',
@@ -337,7 +340,7 @@ export class OutlookProvider implements InboxProvider {
       && /\bcid\s*:/i.test(message.body.content)
     if ((message.hasAttachments || hasInlineAttachments) && !Array.isArray(message.attachments)) {
       const attachments: GraphAttachment[] = []
-      let path: string | undefined = `/me/messages/${encodeURIComponent(message.id)}/attachments?$select=id,name,contentType,size,isInline,contentId`
+      let path: string | undefined = `/me/messages/${encodeURIComponent(message.id)}/attachments?$select=${ATTACHMENT_FIELDS}`
       const seen = new Set<string>()
       while (path) {
         const url = this.resolveUrl(path)
@@ -474,15 +477,23 @@ export class OutlookProvider implements InboxProvider {
         !Array.isArray(value.seen) || value.seen.length > 20_000 || value.seen.some((id: unknown) => typeof id !== 'string' || !id || id.length > 4096)) throw new Error()
       const url = new URL(this.resolveUrl(value.next))
       const base = new URL(this.baseUrl)
-      if (url.pathname !== base.pathname.replace(/\/$/, '') + this.folderPath(options.folder)) throw new Error()
+      if (!this.isListResource(url.pathname, options.folder)) throw new Error()
       return { next: value.next, seen: value.seen }
     } catch { throw new ProviderCursorExpiredError('outlook', 'Graph list cursor does not match this account, resource or selection') }
+  }
+
+  /** Graph nextLinks address folders in OData key form (`mailFolders('inbox')`); compare in segment form. */
+  private isListResource(pathname: string, folder: MailFolder | undefined): boolean {
+    try {
+      const actual = decodeURIComponent(pathname).replace(/\/mailFolders\('((?:[^']|'')+)'\)\//, (_, id: string) => `/mailFolders/${id.replace(/''/g, "'")}/`)
+      return actual === decodeURIComponent(new URL(this.baseUrl).pathname.replace(/\/$/, '') + this.folderPath(folder))
+    } catch { return false }
   }
 
   private encodeListCursor(kind: 'messages' | 'threads', options: ListOptions, next: string | undefined, seen: string[]): string | null {
     if (!next) return null
     const target = new URL(this.resolveUrl(next)), base = new URL(this.baseUrl)
-    if (target.pathname !== base.pathname.replace(/\/$/, '') + this.folderPath(options.folder)) throw new ProviderCursorExpiredError('outlook', 'Graph list continuation changed resource')
+    if (!this.isListResource(target.pathname, options.folder)) throw new ProviderCursorExpiredError('outlook', 'Graph list continuation changed resource')
     const encoded = encodeBase64Url(JSON.stringify({ version: 1, scope: this.listScope(kind, options), next, seen }))
     if (seen.length > 20_000 || encoded.length > 16 * 1024 * 1024 - 64) throw new ProviderCursorExpiredError('outlook', 'Graph list continuation exceeded its bounded identity budget')
     return `${encoded}.${createHmac('sha256', this.cursorKey).update(encoded).digest('base64url')}`
@@ -715,7 +726,7 @@ export class OutlookProvider implements InboxProvider {
 
   async getAttachment(messageId: string, attachmentId: string): Promise<AttachmentData> {
     const attachment = await this.request<GraphAttachment>(
-      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?$select=id,name,contentType,size,isInline,contentId`,
+      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?$select=${ATTACHMENT_FIELDS}`,
     )
     const path = `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`
     const response = await providerRequest(
