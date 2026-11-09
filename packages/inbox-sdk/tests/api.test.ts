@@ -1700,6 +1700,44 @@ describe('IMAP host onboarding boundary', () => {
     } finally { host.inbox.createConnection = original }
   })
 
+  test('tailscale mode admits only allowlisted Tailscale-User-Login requests on an HTTPS tailnet origin', async () => {
+    const root = await mkdtemp(join(TEMP_ROOT, 'tailscale-host-'))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const configPath = join(root, 'local.json')
+    loadLocalConfig({ configPath, environment: {} })
+    const origin = 'https://mailhost.fictional-tailnet.ts.net'
+    const tailscale = { SUPERLOCAL_AUTH_METHOD: 'tailscale', SUPERLOCAL_WEB_ORIGIN: origin }
+    expect(() => loadLocalConfig({ configPath, environment: tailscale })).toThrow(/tailscaleLogins/)
+    expect(() => loadLocalConfig({ configPath, environment: { SUPERLOCAL_WEB_ORIGIN: origin } })).toThrow(/web origin/)
+    expect(() => loadLocalConfig({ configPath, environment: { ...tailscale, SUPERLOCAL_WEB_ORIGIN: 'http://mailhost.fictional-tailnet.ts.net', SUPERLOCAL_AUTH_TAILSCALE_LOGINS: 'owner@github' } })).toThrow(/web origin/)
+    const config = loadLocalConfig({ configPath, environment: { ...tailscale, SUPERLOCAL_AUTH_TAILSCALE_LOGINS: ' Owner@GitHub ' } })
+    expect(config.auth).toEqual(expect.objectContaining({ method: 'tailscale', tailscaleLogins: ['owner@github'] }))
+    expect(config.web.allowedOrigins).toEqual([origin])
+    const host = await createLocalHost({ ...config, dataDir: join(root, 'runtime') }, {})
+    cleanup.push(() => host.close())
+    const base = `http://127.0.0.1:${config.backend.port}`
+    const call = (path: string, init: { method?: string; login?: string; cookie?: string } = {}) => host.fetch(new Request(`${base}${path}`, {
+      method: init.method ?? 'GET',
+      headers: { Origin: origin, 'X-Superlocal': '1', ...(init.login ? { 'Tailscale-User-Login': init.login } : {}), ...(init.cookie ? { Cookie: init.cookie } : {}) },
+    }))
+    expect((await call('/health')).status).toBe(200)
+    for (const login of [undefined, 'intruder@github', 'owner@github.evil']) {
+      const refused = await call('/session', { method: 'POST', login })
+      expect(refused.status).toBe(403)
+      expect((await refused.json()).code).toBe('HOST_TAILSCALE_IDENTITY_REQUIRED')
+    }
+    const started = await call('/session', { method: 'POST', login: 'owner@github' })
+    expect(started.status).toBe(204)
+    const setCookie = started.headers.get('set-cookie')!
+    expect(setCookie).toContain('; Secure')
+    const cookie = setCookie.split(';')[0]!
+    expect((await call('/host/config', { login: 'owner@github', cookie })).status).toBe(200)
+    // A captured session cookie is useless without the Tailscale identity on the same request.
+    expect((await call('/host/config', { cookie })).status).toBe(403)
+    expect((await call('/host/config', { login: 'intruder@github', cookie })).status).toBe(403)
+    expect(await (await call('/host/auth', { login: 'owner@github', cookie })).json()).toEqual({ method: 'loopback' })
+  })
+
   test('onboarding descriptors, configurable provider ids and connect failures derive from SDK definitions, not per-provider host code', async () => {
     const root = await mkdtemp(join(TEMP_ROOT, 'descriptor-host-'))
     cleanup.push(() => rm(root, { recursive: true, force: true }))

@@ -84,6 +84,28 @@ private package instead requires a GitHub token with `read:packages` on the
 deployment host. This workflow never includes runtime mail, keys or config in
 the image.
 
+### Tailnet access with Tailscale identity
+
+To serve one person's installation to their own devices over Tailscale, keep
+the published port on host loopback and front it with `tailscale serve`, which
+adds the verified `Tailscale-User-Login` header to every proxied request:
+
+```sh
+SUPERLOCAL_WEB_ORIGIN=https://<host>.<tailnet>.ts.net \
+SUPERLOCAL_AUTH_METHOD=tailscale \
+SUPERLOCAL_AUTH_TAILSCALE_LOGINS=you@github \
+  docker compose up -d --build --wait
+tailscale serve --bg --https=443 http://127.0.0.1:5178
+```
+
+Every request (except `/health`) must carry an allowlisted login; session
+cookies alone are refused. Mailboxes and settings stay those of the single local
+owner, so an existing loopback installation moves over unchanged. Anything
+that can reach the loopback port directly on the host is trusted, as in
+loopback mode. Register `https://<host>.<tailnet>.ts.net/v1/oauth/google/callback`
+and `/v1/oauth/microsoft/callback` with the OAuth apps for reconnects. The
+client is installable as a PWA from that origin.
+
 ### Restricted Google access
 
 Google is the application login provider for restricted installations. It reuses

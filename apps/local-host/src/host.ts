@@ -157,6 +157,10 @@ export async function createLocalHost(config: LocalConfig = loadLocalConfig(), e
   const origins = new Set(allowedOrigins)
   const hosts = new Set([`127.0.0.1:${config.backend.port}`, `localhost:${config.backend.port}`, ...allowedOrigins.map(value => new URL(value).host)])
   const cookieName = `superlocal_${config.instanceId.replaceAll('-', '')}_${config.mode}`
+  // Tailscale mode: the loopback-bound host is reached only through `tailscale serve`, which sets the
+  // verified Tailscale-User-Login on every proxied request. Anything else on the tailnet is refused.
+  const tailscaleLogins = config.auth.method === 'tailscale' ? new Set(config.auth.tailscaleLogins ?? []) : null
+  const tailscaleUser = (request: Request) => tailscaleLogins?.has((request.headers.get('tailscale-user-login') ?? '').trim().toLowerCase()) ?? true
   const sessions = new Map<string, { expires: number; origin: string }>()
   const cookieHash = (value: string) => createHmac('sha256', runtime.sessionKey).update(value).digest('hex')
   const streamShutdown = new AbortController()
@@ -176,7 +180,7 @@ export async function createLocalHost(config: LocalConfig = loadLocalConfig(), e
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null
     const session = sessions.get(cookieHash(token))
     const origin = request.headers.get('origin')
-    return session && session.expires > Date.now() && (!origin || origin === session.origin) ? { id: owner } : null
+    return session && session.expires > Date.now() && (!origin || origin === session.origin) && tailscaleUser(request) ? { id: owner } : null
   }
   // Provider extensions (OAuth callbacks/handoffs) are mounted below with `authenticate`; requests arrive only afterwards.
   let extensions: HostExtension[] = []
@@ -237,6 +241,9 @@ export async function createLocalHost(config: LocalConfig = loadLocalConfig(), e
     const url = new URL(request.url)
     if (!['http:', 'https:'].includes(url.protocol) || !hosts.has(url.host)) return problem(403, 'HOST_LOOPBACK_REQUIRED', 'Use the configured loopback host or local alias.')
     if (closed) return problem(503, 'HOST_CLOSED', 'The local host is shutting down.')
+    if (!tailscaleUser(request) && !(url.pathname === '/health' && request.method === 'GET')) {
+      return problem(403, 'HOST_TAILSCALE_IDENTITY_REQUIRED', 'Open this installation through its Tailscale address as an allowed Tailscale user.')
+    }
     // Never route encoded or trailing-slash auth aliases through a more permissive handler.
     let normalized: string
     try { normalized = decodeURIComponent(url.pathname).replace(/\/+$/, '') } catch { return problem(400, 'HOST_INVALID_PATH', 'Invalid request path.') }
