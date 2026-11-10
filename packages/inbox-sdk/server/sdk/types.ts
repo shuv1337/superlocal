@@ -219,6 +219,21 @@ export interface ProviderErrorOptions {
   retryAfter?: number
   details?: unknown
   cause?: unknown
+  /** Content-free request class (see requestKind); never a URL, identifier or query. */
+  kind?: string
+}
+
+const REQUEST_KINDS = ['$batch', 'delta', 'attachments', 'history', 'sendMail', 'send', 'move', 'messages', 'threads', 'mailFolders', 'labels', 'drafts', 'profile', 'token'] as const
+
+/** Classifies a provider URL by a fixed vocabulary of path keywords, for diagnostics only. */
+export function requestKind(url: string): string {
+  let segments: string[]
+  try { segments = new URL(url).pathname.split('/') } catch { return 'other' }
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const kind = REQUEST_KINDS.find((name) => segments[index] === name)
+    if (kind) return kind.replace('$', '')
+  }
+  return 'other'
 }
 
 export class ProviderError extends Error {
@@ -228,6 +243,7 @@ export class ProviderError extends Error {
   readonly retryable: boolean
   readonly retryAfter?: number
   readonly details?: unknown
+  readonly kind?: string
 
   constructor(
     provider: InboxProviderType,
@@ -243,6 +259,7 @@ export class ProviderError extends Error {
     this.retryable = options.retryable ?? false
     this.retryAfter = options.retryAfter
     this.details = options.details
+    this.kind = options.kind
   }
 }
 
@@ -501,6 +518,7 @@ export async function providerRequest(
     throw new ProviderError(provider, 'NETWORK', `${provider} request failed`, {
       retryable: true,
       cause: error,
+      kind: requestKind(url),
     })
   }
 
@@ -521,6 +539,7 @@ export async function providerRequest(
     status: response.status,
     details,
     retryAfter: retryAfterSeconds(response.headers.get('retry-after')),
+    kind: requestKind(url),
   }
 
   if (response.status === 401) throw new ProviderAuthenticationError(provider, message, options)

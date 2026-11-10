@@ -2208,6 +2208,46 @@ describe('provider-specific native failures and effective grants', () => {
     } finally { await h.close() }
   })
 
+  test('outlook keeps every Graph call inside the mailbox concurrency budget and reports a content-free failure class', async () => {
+    // Exchange Online returns ApplicationThrottled above four concurrent requests per mailbox.
+    const { OutlookProvider } = await import('../server/sdk/outlook')
+    let active = 0, peak = 0, details = 0, throttle = false
+    const release: Array<() => void> = []
+    const provider = new OutlookProvider({ accountId: 'fictional-outlook', accessToken: 'fictional-token', fetch: (async (input: string | URL | Request) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/messages/delta')) return Response.json({
+        value: Array.from({ length: 12 }, (_, index) => ({ id: `changed-${index}`, isRead: true })), '@odata.deltaLink': `${url.origin}/v1.0/me/mailFolders/inbox/messages/delta?token=next` })
+      if (throttle) return Response.json({ error: { code: 'ApplicationThrottled', message: 'Fictional throttle' } }, { status: 429, headers: { 'Retry-After': '7' } })
+      active++; peak = Math.max(peak, active); details++
+      await new Promise<void>(resolve => { release.push(resolve) })
+      active--
+      const id = decodeURIComponent(url.pathname.split('/').pop()!)
+      return Response.json({ id, conversationId: `thread-${id}`, subject: 'Fictional update', receivedDateTime: '2026-01-02T03:04:05Z', isRead: true, hasAttachments: false,
+        parentFolderId: 'inbox', from: { emailAddress: { address: 'sender@example.test' } }, body: { contentType: 'text', content: 'Fictional body' } })
+    }) as typeof fetch })
+    const sync = provider.sync(null, { folder: 'inbox', limit: 100 })
+    for (let settled = 0; settled < 12;) {
+      for (let waited = 0; waited < 200 && !release.length; waited++) await new Promise(resolve => setTimeout(resolve, 1))
+      expect(release.length).toBeGreaterThan(0)
+      // Give queued work every chance to overrun the budget before releasing a slot.
+      await new Promise(resolve => setTimeout(resolve, 2))
+      expect(active).toBeLessThanOrEqual(3)
+      release.shift()!(); settled++
+    }
+    expect((await sync).messages).toHaveLength(12)
+    expect({ peak, details, active }).toEqual({ peak: 3, details: 12, active: 0 })
+    throttle = true
+    let caught: any
+    try { await provider.getMessage('changed-0') } catch (error) { caught = error }
+    expect(caught).toMatchObject({ code: 'RATE_LIMITED', status: 429, retryAfter: 7, kind: 'messages', details: { error: { code: 'ApplicationThrottled' } } })
+    throttle = false
+    const next = provider.getMessage('changed-1')
+    for (let waited = 0; waited < 200 && !release.length; waited++) await new Promise(resolve => setTimeout(resolve, 1))
+    release.shift()!()
+    expect((await next).id).toBe('changed-1')
+    await provider.disconnect()
+  })
+
   test('outlook delta updates carrying only changed properties are hydrated, never stored as blank messages', async () => {
     const h = await httpHarness('outlook')
     try {

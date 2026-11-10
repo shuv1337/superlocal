@@ -20,6 +20,13 @@ import { createInboxWindowService } from './inbox-window'
 import { createZeroSweepService } from './zero-sweep'
 import type { AiSettings, AiFeedbackInput, AiReadingInput, AiTeachInput, AiThreadKey } from '../../shared/ai-triage'
 
+/** Bounded, content-free provider failure facts for the operator log. */
+function sdkDiagnostic(value: { provider: string; status?: number; retryAfterSeconds?: number; upstream?: string; kind?: string } | undefined) {
+  if (!value) return {}
+  const word = (text: string | undefined) => text && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(text) ? text : undefined
+  const count = (number: number | undefined) => Number.isFinite(number) ? Math.max(0, Math.min(86_400, Math.round(number!))) : undefined
+  return { provider: word(value.provider), status: count(value.status), retryAfterSeconds: count(value.retryAfterSeconds), upstream: word(value.upstream), kind: word(value.kind) }
+}
 const safeHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', Vary: 'Origin, Cookie' }
 function problem(status: number, code: string, error: string): Response {
   return Response.json({ code, error, retryable: status >= 500 }, { status, headers: safeHeaders })
@@ -108,7 +115,7 @@ export async function createLocalHost(config: LocalConfig = loadLocalConfig(), e
       inbox = createInbox({ database: join(runtime.dataDir, 'inbox.sqlite'), encryptionKey: runtime.encryptionKey,
         providers: registrations.map(registration => registration.definition), allowProviderWrites: config.allowProviderWrites,
         defaultPolicy: { remoteImages: true },
-        verifyCredentials: real.verifyCredentials, log: event => console.info(JSON.stringify({ event: 'local.sdk', code: /^[A-Z][A-Z0-9_]{0,79}$/.test(event.code) ? event.code : 'SDK_ERROR' })) })
+        verifyCredentials: real.verifyCredentials, log: event => console.info(JSON.stringify({ event: 'local.sdk', code: /^[A-Z][A-Z0-9_]{0,79}$/.test(event.code) ? event.code : 'SDK_ERROR', ...sdkDiagnostic(event.diagnostic) })) })
     }
   } catch (error) { try { if (mock) await mock.close(); else await inbox?.close() } finally { applicationAuth?.close(); runtime.database.close() }; throw error }
   const liveInbox = inbox

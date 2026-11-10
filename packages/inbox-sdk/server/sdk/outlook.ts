@@ -129,6 +129,13 @@ const MESSAGE_FIELDS = [
 // contentId exists only on fileAttachment; selecting it on the base attachment type is a Graph 400.
 const ATTACHMENT_FIELDS = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId'
 
+/**
+ * Exchange Online throttles an application at four concurrent requests per mailbox
+ * (ApplicationThrottled, HTTP 429). One provider instance serves one mailbox, so every
+ * Graph call shares this budget, with one slot of headroom for requests still settling upstream.
+ */
+const MAX_CONCURRENT_REQUESTS = 3
+
 const GRAPH_FOLDERS: Partial<Record<MailFolder, string>> = {
   inbox: 'inbox',
   sent: 'sentitems',
@@ -194,6 +201,8 @@ export class OutlookProvider implements InboxProvider {
   private readonly fetcher: typeof globalThis.fetch
   private readonly folderIds = new Map<string, MailFolder>()
   private readonly requests = new AbortController()
+  private activeRequests = 0
+  private readonly queuedRequests: Array<() => void> = []
   // Preview continuations are instance-bound, like Inbound snapshots; durable sync uses its separate cursor.
   private readonly cursorKey = randomBytes(32)
 
@@ -237,17 +246,31 @@ export class OutlookProvider implements InboxProvider {
     return headers
   }
 
+  /** Runs one Graph call inside the mailbox's concurrency budget; a finished call hands its slot to the oldest waiter. */
+  private async limited<T>(run: () => Promise<T>): Promise<T> {
+    if (this.activeRequests < MAX_CONCURRENT_REQUESTS) this.activeRequests++
+    else await new Promise<void>((resolve) => { this.queuedRequests.push(resolve) })
+    try {
+      return await run()
+    } finally {
+      const next = this.queuedRequests.shift()
+      if (next) next()
+      else this.activeRequests--
+    }
+  }
+
   private request<T>(pathOrUrl: string, init: RequestInit = {}, pageSize?: number): Promise<T> {
-    return providerJson<T>(
+    const url = this.resolveUrl(pathOrUrl)
+    return this.limited(() => providerJson<T>(
       'outlook',
       this.fetcher,
-      this.resolveUrl(pathOrUrl),
+      url,
       {
         ...init, headers: this.headers(init, pageSize),
         signal: init.signal ? AbortSignal.any([init.signal, this.requests.signal]) : this.requests.signal,
       },
       this.credentials.timeoutMs,
-    )
+    ))
   }
 
   private async collection<T extends { id: string }>(
@@ -730,13 +753,13 @@ export class OutlookProvider implements InboxProvider {
       `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}?$select=${ATTACHMENT_FIELDS}`,
     )
     const path = `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`
-    const response = await providerRequest(
+    const response = await this.limited(() => providerRequest(
       'outlook',
       this.fetcher,
       this.resolveUrl(path),
       { headers: this.headers(), signal: this.requests.signal },
       this.credentials.timeoutMs,
-    )
+    ))
     const normalized = this.normalizeAttachment(attachment, messageId)
     return {
       attachment: normalized,

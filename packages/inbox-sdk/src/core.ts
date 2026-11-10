@@ -40,7 +40,15 @@ function failure(error: unknown): InboxError {
   if (error instanceof ProviderError) {
     const status = { AUTHENTICATION: 409, AUTHORIZATION: 403, NOT_FOUND: 404, RATE_LIMITED: 429,
       INVALID_CURSOR: 409, UNSUPPORTED_OPERATION: 409, VALIDATION: 400, NETWORK: 502, UPSTREAM: 502 }[error.code]
-    return new InboxError(error.code, `Mailbox operation failed: ${error.code.toLowerCase().replaceAll('_', ' ')}.`, status, error.retryable)
+    const issue = new InboxError(error.code, `Mailbox operation failed: ${error.code.toLowerCase().replaceAll('_', ' ')}.`, status, error.retryable)
+    // Operator diagnostics only: a fixed-vocabulary request class and the upstream's own error code.
+    const upstream = (error.details as { error?: { code?: unknown } } | undefined)?.error?.code
+    Object.defineProperty(issue, 'diagnostic', { enumerable: false, value: {
+      provider: error.provider, ...(error.status === undefined ? {} : { status: error.status }),
+      ...(error.retryAfter === undefined ? {} : { retryAfterSeconds: error.retryAfter }),
+      ...(typeof upstream === 'string' && /^[A-Za-z][A-Za-z0-9_.]{0,63}$/.test(upstream) ? { upstream } : {}),
+      ...(error.kind ? { kind: error.kind } : {}) } })
+    return issue
   }
   return new InboxError('INTERNAL', 'The inbox operation could not be completed.', 500)
 }
@@ -3317,7 +3325,7 @@ export function createInbox(options: InboxOptions): Inbox {
               await synchronizeSource(row.owner, row.id, { lane: 'backfill' }, true)
             }
           }, catch: failure,
-        }).pipe(Effect.catchAll(error => Effect.sync(() => options.log?.({ code: error.code, operation: 'sync' })))), { concurrency, discard: true }))
+        }).pipe(Effect.catchAll(error => Effect.sync(() => options.log?.({ code: error.code, operation: 'sync', ...(error.diagnostic ? { diagnostic: error.diagnostic } : {}) })))), { concurrency, discard: true }))
       }).finally(() => { polling = undefined })
       return polling
     },

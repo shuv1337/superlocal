@@ -12,8 +12,13 @@ export interface SendingIdentities {
   checkedAt: string | null
 }
 
+/** Content-free facts about a failed provider request. Never a URL, identifier, message or body. */
+export type ProviderDiagnostic = { provider: string; status?: number; retryAfterSeconds?: number; upstream?: string; kind?: string }
+
 export class InboxError extends Error {
   readonly name = 'InboxError'
+  /** Set only for failures that originated at a provider; for operator logs, never for API responses. */
+  diagnostic?: ProviderDiagnostic
   constructor(
     readonly code: string,
     message: string,
@@ -152,7 +157,7 @@ export interface InboxOptions {
   eventRetention?: number
   leaseMs?: number
   concurrency?: number
-  log?: (event: { code: string; operation: string }) => void
+  log?: (event: { code: string; operation: string; diagnostic?: ProviderDiagnostic }) => void
   allowProviderWrites?: boolean
   /** Host defaults for owners without a saved policy; saved user choices always win. */
   defaultPolicy?: Partial<Policy>
