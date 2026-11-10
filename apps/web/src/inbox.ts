@@ -168,6 +168,13 @@ const flagKey = (target: FlagTarget, field: Flag) => `${nativeKey(target.sourceI
 const definitive = (error: unknown) => error instanceof ApiError && error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status);
 /** A stream counts as healthy only after staying open this long; ready/close flapping neither refreshes nor recovers. */
 const STREAM_HEALTHY_MS = 5000;
+/**
+ * A background read cut off by the network (for example the browser aborting requests on an OS
+ * network change) normally recovers once the event stream reconnects and catches up. Its notice
+ * waits this long, enough for a reconnect, the healthy hold and one catch-up read, and is dropped
+ * if any snapshot read succeeds meanwhile. A failure that outlasts it is announced as before.
+ */
+const SNAPSHOT_NETWORK_GRACE_MS = 15_000;
 const recoveryKey = "sdk-draft-recovery";
 const outboxKey = "sdk-outbox-references";
 const formatAddress = (person: Participant) => person.name && person.name !== person.email
@@ -286,6 +293,8 @@ export class InboxStore {
   private importantTimer?: ReturnType<typeof setTimeout>;
   private importantDeadline = Infinity;
   private refreshTimer?: ReturnType<typeof setTimeout>;
+  private snapshotNoticeTimer?: ReturnType<typeof setTimeout>;
+  private snapshotRecoveries = 0;
   private sourceAccounts: Account[] = [];
   private boxes: Mailbox[] = [];
   private summaries = new Map<string, MailboxMessageSummary[]>();
@@ -948,6 +957,8 @@ export class InboxStore {
         this.reconcileFlags(); this.rebuild();
         cursor = page.nextCursor ?? undefined;
       } while (cursor);
+      // A completed drain is authoritative recovery for the window, like openWindow and bootstrap.
+      this.resolve("snapshot");
     })().catch(error => {
       // Failed reads retain their consumed replay for the next explicit/event-driven attempt.
       if (replayCheckpoint && epoch === this.windowEpoch && generation === this.generation &&
@@ -1219,6 +1230,18 @@ export class InboxStore {
     const detail = failureMessage(error);
     if (action === "connect" || action === "refresh" || action === "retry") {
       this.publish({ loading: false, refreshing: false, error: detail });
+      // Only a loaded inbox's background read waits; connect and an explicit Retry report at once.
+      if (action === "refresh" && code === "NETWORK" && this.state.loaded && !this.state.issues.some(issue => issue.scope === "snapshot")) {
+        if (this.snapshotNoticeTimer === undefined) {
+          const recoveries = this.snapshotRecoveries, generation = this.generation;
+          this.snapshotNoticeTimer = setTimeout(() => {
+            this.snapshotNoticeTimer = undefined;
+            if (recoveries !== this.snapshotRecoveries || generation !== this.generation) return;
+            this.raise({ scope: "snapshot", code, title: "Couldn't refresh the inbox", detail, retry: true });
+          }, SNAPSHOT_NETWORK_GRACE_MS);
+        }
+        return;
+      }
       this.raise({ scope: "snapshot", code, title: this.state.loaded ? "Couldn't refresh the inbox" : "Couldn't open the inbox", detail, retry: true });
     } else if (action === "load-thread") this.raise({ scope: "thread", code, title: "Couldn't load this conversation", detail, retry: true });
     else if (action === "save-draft") this.raise({ key, scope: "draft", code, title: "Draft not saved", detail, retry: false });
@@ -1241,6 +1264,7 @@ export class InboxStore {
   }
   /** Marks a scope recovered. Its notices leave only after the recovery holds, so a quick relapse keeps the same quiet notice. */
   private resolve(scope: InboxIssue["scope"]) {
+    if (scope === "snapshot") { this.snapshotRecoveries++; clearTimeout(this.snapshotNoticeTimer); this.snapshotNoticeTimer = undefined; }
     for (const issue of this.state.issues) if (issue.scope === scope && !this.issueHolds.has(issue.key)) {
       this.issueHolds.set(issue.key, setTimeout(() => {
         this.issueHolds.delete(issue.key);
@@ -1439,6 +1463,7 @@ export class InboxStore {
       clearTimeout(this.aiRebuildTimer); this.aiRebuildTimer = undefined; this.aiRebuildThreads.clear();
       for (const timer of this.saveTimers.values()) clearTimeout(timer);
       for (const timer of this.issueHolds.values()) clearTimeout(timer);
+      clearTimeout(this.snapshotNoticeTimer); this.snapshotNoticeTimer = undefined;
       this.saveTimers.clear(); this.issueHolds.clear(); this.loadingThreads.clear(); this.refreshPromise = undefined; this.updatesPromise = undefined; this.folderDiscovery = undefined;
       this.categoryReads = undefined;
       this.wake?.();
@@ -1496,8 +1521,12 @@ export class InboxStore {
         const serverWait = retryAfter(failure);
         const delay = Math.max(serverWait, Math.round(Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(attempt - 1, 6) * (0.5 + Math.random()))));
         console.warn({ event: "inbox.action", action: "events", code, attempt, delayMs: delay });
-        if (this.state.live !== "polling") this.publish({ live: "polling" });
-        this.raise({ scope: "live", code, title: "Live updates paused", detail: liveDetail(code), retry: true });
+        // A single dropped connection (an OS network change aborts every in-flight request) reconnects
+        // within about a second; only a second consecutive failure is a pause worth announcing.
+        if (attempt > 1 || code !== "NETWORK") {
+          if (this.state.live !== "polling") this.publish({ live: "polling" });
+          this.raise({ scope: "live", code, title: "Live updates paused", detail: liveDetail(code), retry: true });
+        }
         if (!lastPoll) lastPoll = Date.now();
         const notBefore = Date.now() + serverWait;
         const until = Date.now() + delay;

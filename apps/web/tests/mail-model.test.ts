@@ -2773,7 +2773,7 @@ test("demand-driven host windows bound automatic requests and render unknown tot
     });
     assert.equal(result.code, 0, result.output); return;
   }
-  const [{ InboxStore }, { mock }, { createElement }, { renderToStaticMarkup }] = await Promise.all([
+  const [{ InboxStore }, { mock, jest }, { createElement }, { renderToStaticMarkup }] = await Promise.all([
     import("../src/inbox.ts"), import("bun:test"), import("react"), import("react-dom/server"),
   ]);
   type Page = import("../../shared/inbox-window").InboxWindowPage;
@@ -3303,6 +3303,7 @@ test("demand-driven host windows bound automatic requests and render unknown tot
             if (withToken) {
               await until(() => requests.length === 1 && store.getSnapshot().error !== null, "a network failure interrupts the signed replay");
               await sleep(150); assert.equal(requests.length, 1, "a failed replay does not introduce an automatic retry");
+              assert.equal(store.getSnapshot().issues.some(issue => issue.scope === "snapshot"), false, "a background network interruption waits for the catch-up read before announcing");
               assert.equal(store.getSnapshot().mail.find(mail => mail.id === oldRow.key)!.starred, false);
               await store.retry();
               assert.deepEqual(requests[1], requests[0], "explicit retry retains the entire consumed checkpoint and wanted scope");
@@ -3313,6 +3314,22 @@ test("demand-driven host windows bound automatic requests and render unknown tot
             assert.strictEqual(store.getSnapshot().mail.find(mail => mail.id === companionRow.key), companion);
             assert.equal(bodyReads.length, bodiesBefore); assert.equal(queries, queriesBefore); assert.equal(lookupReads, 1);
             scopeChanges = undefined;
+          }
+
+          {
+            // A window-mode refresh notice retires on the next successful drain, not only on reopen.
+            const snapshotIssue = () => store.getSnapshot().issues.find(issue => issue.scope === "snapshot" && !issue.dismissed);
+            scopeChanges = async () => { scopeChanges = undefined; throw new TypeError("Fictional retry network failure"); };
+            await store.retry();
+            assert.equal(snapshotIssue()?.title, "Couldn't refresh the inbox", "an explicit Retry reports its network failure at once");
+            // The Retry drain needs no timers; virtual time only elapses the recovery hold.
+            jest.useFakeTimers();
+            try {
+              await store.retry(); assert.equal(store.getSnapshot().error, null);
+              assert.ok(snapshotIssue(), "recovery holds the notice briefly so flapping never re-announces");
+              jest.advanceTimersByTime(10_001);
+            } finally { jest.useRealTimers(); }
+            assert.equal(snapshotIssue(), undefined, "a successful window drain retires the refresh notice after its hold");
           }
 
           const senderRequests: SenderInput[] = [], requestOrder: string[] = [];
