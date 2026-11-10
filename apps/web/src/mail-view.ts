@@ -244,7 +244,8 @@ export function selectMailView(
     (name) =>
       !preferences.hideEmptySplits || name === split || splitCounts[name] == null || splitCounts[name]! > 0,
   );
-  const rowHeight = mobile ? 44 : preferences.density === "Compact" ? 30 : 36;
+  // Phone rows stack sender, subject and recipients; keep this equal to --mobile-row in mobile.css.
+  const rowHeight = mobile ? 76 : preferences.density === "Compact" ? 30 : 36;
   const entries: MailListEntry[] = [];
   let totalHeight = 0;
   for (const [index, message] of visibleMail.entries()) {
@@ -259,12 +260,12 @@ export function selectMailView(
       entries.push({
         key: `group-${message.id}`,
         top: totalHeight,
-        height: 60,
+        height: mobile ? 40 : 60,
         mail: message,
         index,
         group: message.group,
       });
-      totalHeight += 60;
+      totalHeight += mobile ? 40 : 60;
     }
     entries.push({
       key: message.id,

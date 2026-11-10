@@ -60,6 +60,7 @@ import { captureIssueReport, type IssueReport } from "./issue-reports";
 import SenderContext from "./SenderContext";
 import { senderContact, senderConversations } from "./sender-context";
 import { normalizeSplits, attentionSplit, type SplitPreferences } from "../../shared/splits";
+import "./mobile.css";
 
 const unknownTotals: InboxTotals = { conversations: null, messages: null, inbox: null, splits: {}, folders: {}, holding: null };
 type Route = {
@@ -2111,6 +2112,31 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
     (inbox.aiError || !inbox.ai.configured || inbox.ai.problemCode || inbox.ai.settings.mailboxIds?.length === 0)
     ? aiSortingStatus(inbox.ai, !!inbox.aiError).label : null;
 
+  const splitTabs = (
+    <div className="split-tabs" role="tablist" aria-label="Split Inbox">
+      {shownSplits.map((split) => (
+        <button
+          key={split}
+          role="tab"
+          aria-selected={route.split === split}
+          className={route.split === split ? "active" : ""}
+          onClick={() => goFolder("Inbox", split)}
+        >
+          <span className="split-tab-label">{split}</span>
+          {splitCounts[split] != null ? (
+            <span className="split-tab-count">{splitCounts[split]}</span>
+          ) : null}
+        </button>
+      ))}
+      <IconButton
+        name="Gear"
+        title="Split Inbox Settings"
+        className="split-settings"
+        onClick={() => openSettings("Split Inbox")}
+      />
+    </div>
+  );
+
   return (
     <div
       className={`app ${navigation ? "navigation-open" : ""} ${settings ? "settings-open" : ""} ${mobileSidebar ? "mobile-sidebar-open" : ""} ${route.view === "calendar" || route.view === "snippets" ? "auxiliary-view" : ""} ${preferences.rightSidebar === false ? "right-sidebar-hidden" : ""}`}
@@ -2352,35 +2378,8 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
                     />
                   ))}
                 </div>
-              ) : route.folder === "Inbox" ? (
-                <div
-                  className="split-tabs"
-                  role="tablist"
-                  aria-label="Split Inbox"
-                >
-                  {shownSplits.map((split) => (
-                    <button
-                      key={split}
-                      role="tab"
-                      aria-selected={route.split === split}
-                      className={route.split === split ? "active" : ""}
-                      onClick={() => goFolder("Inbox", split)}
-                    >
-                      <span className="split-tab-label">{split}</span>
-                      {splitCounts[split] != null ? (
-                        <span className="split-tab-count">{splitCounts[split]}</span>
-                      ) : null}
-                    </button>
-                  ))}
-                  <IconButton
-                    name="Gear"
-                    title="Split Inbox Settings"
-                    className="split-settings"
-                    onClick={() => openSettings("Split Inbox")}
-                  />
-                </div>
-              ) : (
-                <h1 className="folder-title">{route.folder}</h1>
+              ) : route.folder === "Inbox" && !mobileViewport ? splitTabs : (
+                <h1 className="folder-title">{route.folder === "Inbox" ? route.split : route.folder}</h1>
               )}
               {!selected.length && (
                 <div className="header-actions">
@@ -2593,6 +2592,13 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
                 <div className="empty-mailbox" role={searchResult.error ? "alert" : "status"}>{searchResult.error || "Searching…"}</div>
               )}
             </div>
+            {mobileViewport && !search && !selected.length && (
+              <nav className="mobile-bar" aria-label="Inbox navigation">
+                {route.folder === "Inbox" ? splitTabs : <span className="mobile-bar-title">{route.folder}</span>}
+                <IconButton name="Search" title="Search" onClick={() => startSearch()} />
+                <IconButton name="PencilSquircle" title="Compose" disabled={!activeAccount?.canSend} onClick={() => newDraft()} />
+              </nav>
+            )}
           </>
         )}
         {route.draft && currentDraft?.popOut && composer}
