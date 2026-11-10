@@ -18,6 +18,19 @@
     -webkit-tap-highlight-color: transparent;
   }
 
+  /*
+   * Vertical scrollers pan on one axis only. iOS rubber-bands a scroller sideways as soon as its
+   * content is wider by a fraction of a pixel, which let Settings drift under the finger.
+   */
+  html, body { overscroll-behavior: none; }
+  .app .settings-scroll,
+  .app .folder-list {
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+    touch-action: pan-y;
+  }
+  .app .settings-content { min-width: 0; overflow-wrap: anywhere; }
+
   /* Rail: off the inbox, and the icon strip of the folder drawer when it is open. */
   .app > .app-rail { display: none; }
   .app.navigation-open > .app-rail {
