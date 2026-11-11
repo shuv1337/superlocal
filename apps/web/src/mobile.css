@@ -185,9 +185,37 @@
   .mobile-bar-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); font-size: 17px; }
   .mobile-bar > .icon-button { width: 44px; height: 44px; }
 
-  /* Notices and toasts sit on the bottom bar, never over rows: the next row must stay swipeable after Done. */
-  .app .notice-stack { left: calc(var(--safe-left) + 8px); right: calc(var(--safe-right) + 8px); bottom: calc(var(--safe-bottom) + 2px); max-width: none; }
-  .app .toast { bottom: calc(var(--safe-bottom) + 2px); }
+  /*
+   * Notices and toasts: a compact pill under the status bar, over the header title. Down by the
+   * thumb it covered either the next row to swipe or the conversation's action buttons.
+   */
+  .app .notice-stack {
+    top: calc(var(--safe-top) + 6px);
+    bottom: auto;
+    left: calc(var(--safe-left) + 56px);
+    right: calc(var(--safe-right) + 56px);
+    max-width: none;
+    align-items: center;
+  }
+  .app .notice-stack .notice-list { align-items: center; }
+  .app .notice-stack > .toast,
+  .app .notice-stack .notice {
+    height: auto;
+    min-height: 40px;
+    max-width: 100%;
+    border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+    border-radius: 20px;
+    background: color-mix(in srgb, var(--panel) 88%, var(--text));
+    box-shadow: 0 8px 24px #0006;
+    font-size: 14px;
+    animation: mobile-toast-in 180ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .app .notice-stack .toast-status { padding: 0 4px 0 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app .notice-stack .notice { padding-left: 16px; }
+  .app .notice-stack .toast-undo,
+  .app .notice-stack .notice-action { height: 40px; padding: 0 12px; font-weight: 500; }
+  .app .notice-stack .toast-close.icon-button,
+  .app .notice-stack .notice-close.icon-button { width: 40px; height: 40px; padding: 14px; margin: 0 2px 0 -6px; }
 
   /* Conversation: full screen, with its actions in a bottom bar. */
   .app .message-view { --reader-gutter: 0px; }
@@ -226,4 +254,8 @@
 @media (max-width: 700px) and (display-mode: standalone) {
   /* style.css is bundled after this file, so these need more specificity than its html/body/#root/.app heights. */
   :root:root, :root body, :root #root, :root .app { height: var(--standalone-height, 100vh); }
+}
+
+@keyframes mobile-toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
 }
