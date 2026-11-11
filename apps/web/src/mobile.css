@@ -215,11 +215,9 @@
 }
 
 /*
- * Installed iOS web app. With a translucent status bar, iOS reports a layout viewport that is
- * shorter than the screen, so `100%`, `100dvh` and `position: fixed; bottom: 0` all stop short of
- * the bottom edge and leave a dead band under the bars. An installed app has no collapsing
- * browser chrome, so the large viewport (`100vh`) is the real screen height.
+ * Installed iOS web app: main.tsx measures the real screen height because iOS's layout viewport
+ * (`100%`, `100vh`, `100dvh` alike) stops short of the bottom edge under a translucent status bar.
  */
 @media (max-width: 700px) and (display-mode: standalone) {
-  html, body, #root, .app { height: 100vh; }
+  html, body, #root, .app { height: var(--standalone-height, 100vh); }
 }
