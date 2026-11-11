@@ -1,9 +1,10 @@
 /*
- * Phone layout. Everything here is scoped to narrow viewports and loads after the
- * component styles, so the desktop appearance is untouched.
+ * Phone layout. Everything here is scoped to narrow viewports, so the desktop appearance is
+ * untouched. style.css is bundled after this file (main.tsx imports the app first), so every
+ * rule here must out-specify the desktop rule it replaces rather than rely on source order.
  */
 @media (max-width: 700px) {
-  .app {
+  :root .app {
     --mobile-row: 76px; /* Keep equal to the phone rowHeight in mail-view.ts. */
     --mobile-bar: 52px;
     --safe-top: env(safe-area-inset-top, 0px);
@@ -219,5 +220,6 @@
  * (`100%`, `100vh`, `100dvh` alike) stops short of the bottom edge under a translucent status bar.
  */
 @media (max-width: 700px) and (display-mode: standalone) {
-  html, body, #root, .app { height: var(--standalone-height, 100vh); }
+  /* style.css is bundled after this file, so these need more specificity than its html/body/#root/.app heights. */
+  :root:root, :root body, :root #root, :root .app { height: var(--standalone-height, 100vh); }
 }
