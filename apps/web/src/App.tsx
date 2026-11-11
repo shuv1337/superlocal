@@ -60,6 +60,7 @@ import { captureIssueReport, type IssueReport } from "./issue-reports";
 import SenderContext from "./SenderContext";
 import { senderContact, senderConversations } from "./sender-context";
 import { normalizeSplits, attentionSplit, type SplitPreferences } from "../../shared/splits";
+import { attachRowSwipe, type RowSwipe } from "./touch-gestures";
 import "./mobile.css";
 
 const unknownTotals: InboxTotals = { conversations: null, messages: null, inbox: null, splits: {}, folders: {}, holding: null };
@@ -308,11 +309,15 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
       }
     }
   }, []);
+  // Always the current render's handler: the gesture listeners outlive individual renders.
+  const rowSwipe = useRef<(swipe: RowSwipe) => void>(() => {});
   const attachList = useCallback((root: HTMLDivElement | null) => {
     list.current = root;
     if (!root) return;
     restoreListPosition(root, listScroll.current);
+    const detachSwipe = attachRowSwipe(root, swipe => rowSwipe.current(swipe));
     return () => {
+      detachSwipe();
       listScroll.current = root.scrollTop;
       list.current = null;
     };
@@ -1078,6 +1083,13 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
       openOverlay(action, [mail.id]);
     }
   }
+  // Phone swipes: left marks Done, right opens Remind Me (the Superhuman defaults).
+  rowSwipe.current = ({ id, index, direction }) => {
+    const mail = visibleMail[index];
+    if (!mail || mail.id !== id) return;
+    if (direction === "left") void applyAction("done", [id]);
+    else { setHighlight(index); openOverlay("remind", [id]); }
+  };
   function highlightPointerRow(event: PointerEvent<HTMLDivElement>) {
     if (event.type === "pointermove" && event.pointerType === "touch") return;
     if (!(event.target instanceof Element)) return;

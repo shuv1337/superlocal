@@ -12,6 +12,8 @@ type MessageBodyProps = {
   onKeyboard: (event: KeyboardEvent) => void;
   onImageSettings: () => void;
   onCanvasColor: (color: MessageCanvasColor | null) => void;
+  /** Lets the reader attach gesture listeners to the body document; returns their cleanup. */
+  onDocument?: (doc: Document) => (() => void) | void;
 };
 
 function canvasColor(doc: Document): MessageCanvasColor | null {
@@ -204,7 +206,7 @@ function emailDocument(html: string, styles: string, fontSize: string) {
   return { id, html: `<!doctype html>${doc.documentElement.outerHTML}`, blockedImages };
 }
 
-export default function MessageBody({ html, text = "", format, styles = "", fontSize, onActivate, onKeyboard, onImageSettings, onCanvasColor }: MessageBodyProps) {
+export default function MessageBody({ html, text = "", format, styles = "", fontSize, onActivate, onKeyboard, onImageSettings, onCanvasColor, onDocument }: MessageBodyProps) {
   const frame = useRef<HTMLIFrameElement>(null);
   const cleanup = useRef<() => void>(() => {});
   const activate = useEffectEvent(onActivate);
@@ -287,8 +289,10 @@ export default function MessageBody({ html, text = "", format, styles = "", font
     }
     void doc.fonts.ready.then(schedule);
     measure();
+    const detachDocument = onDocument?.(doc);
     cleanup.current = () => {
       disposed = true;
+      detachDocument?.();
       cancelAnimationFrame(pending);
       bodySize.disconnect();
       frameSize.disconnect();

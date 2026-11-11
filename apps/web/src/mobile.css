@@ -128,6 +128,31 @@
   .app .mail-row:active { background: var(--panel); }
   .app .empty-mailbox { height: calc(100% - var(--mobile-bar)); }
 
+  /* Row swipes (touch-gestures.ts): the row slides over a coloured reveal. Left = Done, right = Remind Me. */
+  .app .mail-row { touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .app .mail-row.swiping { position: relative; z-index: 2; background: var(--bg); will-change: transform; }
+  .mail-swipe-reveal {
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 500;
+    pointer-events: none;
+    transition: background-color 120ms linear;
+  }
+  .mail-swipe-reveal[data-direction="left"] { justify-content: flex-end; background: color-mix(in srgb, #3f9b6b 45%, var(--bg)); }
+  .mail-swipe-reveal[data-direction="right"] { justify-content: flex-start; background: color-mix(in srgb, #c98a2b 45%, var(--bg)); }
+  .mail-swipe-reveal[data-direction="left"][data-armed="true"] { background: #3f9b6b; }
+  .mail-swipe-reveal[data-direction="right"][data-armed="true"] { background: #c98a2b; }
+  .mail-swipe-reveal[data-direction="left"]::after { content: "Done"; }
+  .mail-swipe-reveal[data-direction="right"]::before { content: "Remind"; }
+  .app .thread-view { touch-action: pan-y pinch-zoom; }
+
   /* Bottom bar */
   .mobile-bar {
     position: absolute;

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -19,6 +20,7 @@ import {
   type MailboxOption,
   type LoadSendingIdentities,
 } from "./data";
+import { attachSwipeBack } from "./touch-gestures";
 import "./message.css";
 import "./thread-comments.css";
 import { plainText } from "./mail-text";
@@ -241,6 +243,12 @@ export default function ThreadView({
     if (heading) observer.observe(heading);
     return () => observer.disconnect();
   }, []);
+
+  // Phone: swipe right anywhere on the conversation, including inside an email body, to go back.
+  const back = useRef(onBack);
+  back.current = onBack;
+  const swipeBack = useCallback((source: HTMLElement | Document) => attachSwipeBack(source, () => readerPane.current, () => back.current()), []);
+  useEffect(() => readerPane.current ? swipeBack(readerPane.current) : undefined, [swipeBack]);
 
   useEffect(() => {
     const gutter = backGutter.current;
@@ -910,6 +918,7 @@ export default function ThreadView({
                         onActivate={() => { activeMessage.current = key; reportMessagePins(); }}
                         onKeyboard={event => bodyKeyboard(event, message.id)}
                         onImageSettings={onImageSettings}
+                        onDocument={swipeBack}
                         onCanvasColor={color => setMessageCanvases(all => {
                           const previous = all[message.id];
                           if (previous === color || previous && color && previous.every((channel, index) => channel === color[index])) return all;
