@@ -187,15 +187,18 @@
   /* Conversation: full screen, with its actions in a bottom bar. */
   .app .message-view { --reader-gutter: 0px; }
   .app .message-view .message-column { width: 100%; max-width: 100%; }
-  .app .message-view-header { padding: 6px 0 8px; }
+  /* Extra room under the status bar: iOS softens content drawn directly beneath it. */
+  .app .message-view-header { padding: 16px 0 8px; }
   .app .message-heading-row { padding: 0 calc(var(--safe-right) + 16px) 0 calc(var(--safe-left) + 52px); min-height: 44px; align-items: center; }
   .app .message-heading-row h1 { font-size: 20px; line-height: 26px; }
-  .app .thread-back-gutter { inset: 6px auto auto calc(var(--safe-left) + 4px); width: 44px; height: 44px; }
-  .app .message-view .message-back { left: calc(var(--safe-left) + 4px); top: 6px; width: 44px; height: 44px; padding: 14px; }
+  .app .thread-back-gutter { inset: 16px auto auto calc(var(--safe-left) + 4px); width: 44px; height: 44px; }
+  .app .message-view .message-back { left: calc(var(--safe-left) + 4px); top: 16px; width: 44px; height: 44px; padding: 14px; }
   .app .thread-back-gutter::before { display: none; }
   .app .thread-back-arrow { position: static; width: 44px; height: 44px; }
+  /* Anchored to the conversation pane, not the viewport: see the standalone note at the end of this file. */
+  .app .thread-view-header { position: static; }
   .app .thread-header-actions {
-    position: fixed;
+    position: absolute;
     inset: auto 0 0;
     z-index: 12;
     height: calc(var(--mobile-bar) + var(--safe-bottom));
@@ -206,6 +209,17 @@
     border-top: 1px solid var(--border);
   }
   .app .message-view .thread-header-actions .icon-button { width: 44px; height: 44px; padding: 0; }
+  .app .thread-view .message-view-scroll { padding-bottom: calc(var(--mobile-bar) + var(--safe-bottom) + 70px); }
   .app .thread-toolbar { padding-inline: calc(var(--safe-left) + 16px) calc(var(--safe-right) + 16px); }
   .app .thread-comment-footer { bottom: calc(var(--mobile-bar) + var(--safe-bottom)); padding-left: 0; }
+}
+
+/*
+ * Installed iOS web app. With a translucent status bar, iOS reports a layout viewport that is
+ * shorter than the screen, so `100%`, `100dvh` and `position: fixed; bottom: 0` all stop short of
+ * the bottom edge and leave a dead band under the bars. An installed app has no collapsing
+ * browser chrome, so the large viewport (`100vh`) is the real screen height.
+ */
+@media (max-width: 700px) and (display-mode: standalone) {
+  html, body, #root, .app { height: 100vh; }
 }
