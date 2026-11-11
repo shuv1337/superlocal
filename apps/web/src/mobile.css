@@ -181,9 +181,9 @@
   .mobile-bar-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle); font-size: 17px; }
   .mobile-bar > .icon-button { width: 44px; height: 44px; }
 
-  /* Notices and toasts clear the bar and the home indicator. */
-  .app .notice-stack { left: calc(var(--safe-left) + 12px); right: calc(var(--safe-right) + 12px); bottom: calc(var(--mobile-bar) + var(--safe-bottom) + 12px); max-width: none; }
-  .app .toast { bottom: calc(var(--mobile-bar) + var(--safe-bottom) + 12px); }
+  /* Notices and toasts sit on the bottom bar, never over rows: the next row must stay swipeable after Done. */
+  .app .notice-stack { left: calc(var(--safe-left) + 8px); right: calc(var(--safe-right) + 8px); bottom: calc(var(--safe-bottom) + 2px); max-width: none; }
+  .app .toast { bottom: calc(var(--safe-bottom) + 2px); }
 
   /* Conversation: full screen, with its actions in a bottom bar. */
   .app .message-view { --reader-gutter: 0px; }
