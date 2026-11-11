@@ -23,23 +23,44 @@ const intent = (dx: number, dy: number) => Math.abs(dy) > LOCK_PX && Math.abs(dy
 
 export type RowSwipe = { id: string; index: number; direction: "left" | "right" };
 
+const EASE = "cubic-bezier(0.22, 0.61, 0.36, 1)";
+/** px/ms above which a short flick commits without reaching the distance threshold. */
+const FLICK = 0.5;
+
 /**
- * Swipe a conversation row: left past the threshold commits `left`, right commits `right`.
- * The row follows the finger over a coloured reveal; short of the threshold it springs back.
+ * Swipe a conversation row: left commits `left`, right commits `right`, by distance or by flick.
+ * The row tracks the finger 1:1 over a coloured reveal; a short, slow swipe springs back.
+ *
+ * Smoothness rules: nothing here causes a React render, state lives in data attributes and inline
+ * styles React does not manage (a re-render rewrites `className`), the row is on its own layer
+ * from touchstart, and all style writes are coalesced into one per animation frame.
  */
 export function attachRowSwipe(list: HTMLElement, onSwipe: (swipe: RowSwipe) => void): () => void {
-  let track: Track | null = null, row: HTMLElement | null = null, reveal: HTMLElement | null = null, armed = false, settle: ReturnType<typeof setTimeout> | undefined;
+  let track: Track | null = null, row: HTMLElement | null = null, reveal: HTMLElement | null = null;
+  let armed = false, origin = 0, offset = 0, frame = 0, settle: ReturnType<typeof setTimeout> | undefined;
+  // The last two samples give the release velocity.
+  let lastX = 0, lastAt = 0, velocity = 0;
   const threshold = () => Math.min(120, list.clientWidth * 0.3);
   const clear = (target: HTMLElement | null) => {
-    if (target) { target.style.transform = ""; target.style.transition = ""; target.style.opacity = ""; target.classList.remove("swiping"); }
+    cancelAnimationFrame(frame); frame = 0;
+    if (target) {
+      for (const name of ["transform", "transition", "opacity", "height", "padding-block", "overflow"]) target.style.removeProperty(name);
+      delete target.dataset.swipe;
+    }
     reveal?.remove(); reveal = null;
+  };
+  const paint = () => {
+    frame = 0;
+    if (row) row.style.transform = `translate3d(${offset}px,0,0)`;
+    if (reveal) { reveal.dataset.direction = offset < 0 ? "left" : "right"; reveal.dataset.armed = String(armed); }
   };
   const start = (event: TouchEvent) => {
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>(".mail-row[data-mail-id]") : null;
     if (!target || target.parentElement !== list || target.classList.contains("selected")) { track = null; return; }
     // A new touch ends any release animation still running on another row.
     clearTimeout(settle); clear(row);
-    track = begin(event); row = target; armed = false;
+    track = begin(event); row = target; armed = false; offset = 0; velocity = 0;
+    if (track) { lastX = track.x; lastAt = event.timeStamp; target.dataset.swipe = "ready"; }
   };
   const move = (event: TouchEvent) => {
     if (!track || !row) return;
@@ -48,10 +69,12 @@ export function attachRowSwipe(list: HTMLElement, onSwipe: (swipe: RowSwipe) => 
     if (!change) return;
     if (!track.locked) {
       const kind = intent(change.dx, change.dy);
-      if (kind === "vertical") { track = null; return; }
+      if (kind === "vertical") { delete row.dataset.swipe; track = null; return; }
       if (kind !== "horizontal") return;
       track.locked = true;
-      row.classList.add("swiping");
+      // Start from where the finger is now, so the row does not jump by the lock distance.
+      origin = change.dx;
+      row.dataset.swipe = "active";
       reveal = document.createElement("div");
       reveal.className = "mail-swipe-reveal"; reveal.setAttribute("aria-hidden", "true");
       reveal.style.top = `${row.offsetTop}px`; reveal.style.height = `${row.offsetHeight}px`;
@@ -59,35 +82,54 @@ export function attachRowSwipe(list: HTMLElement, onSwipe: (swipe: RowSwipe) => 
     }
     // Claimed: the list must not scroll and the page must not navigate.
     if (event.cancelable) event.preventDefault();
-    const limit = threshold();
-    // Past the threshold the row follows at a third of the finger's speed, as a "that is enough" cue.
-    const offset = Math.sign(change.dx) * (Math.abs(change.dx) <= limit ? Math.abs(change.dx) : limit + (Math.abs(change.dx) - limit) / 3);
-    row.style.transform = `translate3d(${offset}px,0,0)`;
-    const next = Math.abs(change.dx) >= limit;
-    if (reveal) {
-      reveal.dataset.direction = change.dx < 0 ? "left" : "right";
-      reveal.dataset.armed = String(next);
-    }
-    if (next !== armed) { armed = next; if (next) navigator.vibrate?.(8); }
+    const x = track.x + change.dx, elapsed = event.timeStamp - lastAt;
+    if (elapsed > 0) { velocity = 0.6 * ((x - lastX) / elapsed) + 0.4 * velocity; lastX = x; lastAt = event.timeStamp; }
+    offset = change.dx - origin;
+    armed = Math.abs(offset) >= threshold();
+    frame ||= requestAnimationFrame(paint);
   };
   const end = (event: TouchEvent) => {
     if (!track || !row) return;
-    const active = track, target = row, change = delta(event, active);
+    const active = track, target = row;
     track = null;
-    if (!active.locked) return;
+    if (!active.locked) { delete target.dataset.swipe; return; }
+    cancelAnimationFrame(frame); frame = 0;
     // The browser may still synthesize a click for this touch; a swipe never opens the row.
     const swallow = (click: Event) => { click.stopPropagation(); click.preventDefault(); };
     list.addEventListener("click", swallow, { capture: true, once: true });
     setTimeout(() => list.removeEventListener("click", swallow, true), 400);
-    const commit = event.type === "touchend" && armed && change;
-    target.style.transition = "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms linear";
-    if (commit && change.dx < 0) {
-      // Done removes the row: let it leave in the swipe direction instead of snapping back first.
-      target.style.transform = "translate3d(-100%,0,0)"; target.style.opacity = "0";
-    } else target.style.transform = "";
-    if (commit) onSwipe({ id: target.dataset.mailId!, index: Number(target.getAttribute("aria-rowindex")) - 1, direction: change.dx < 0 ? "left" : "right" });
-    // If the row is still mounted afterwards (action refused, or a recycled virtual row), restore it.
-    settle = setTimeout(() => { clear(target); if (row === target) row = null; }, commit && change.dx < 0 ? 600 : 200);
+    // A finger that stopped before lifting is not a flick, whatever its earlier speed.
+    const speed = event.timeStamp - lastAt > 80 ? 0 : velocity;
+    const flick = Math.abs(speed) >= FLICK && Math.sign(speed) === Math.sign(offset) && Math.abs(offset) > 24;
+    const commit = event.type === "touchend" && (armed || flick);
+    const direction = offset < 0 ? "left" : "right";
+    if (reveal && commit) reveal.dataset.armed = "true";
+    const width = list.clientWidth;
+    if (commit && direction === "left") {
+      // Done removes the row: it leaves at the finger's speed, then the list closes up at once
+      // instead of holding an empty slot until the action settles.
+      const remaining = width - Math.abs(offset);
+      const slide = Math.round(Math.min(220, Math.max(90, remaining / Math.max(Math.abs(speed), 1.2))));
+      target.style.transition = `transform ${slide}ms ${EASE}`;
+      target.style.transform = "translate3d(-100%,0,0)";
+      const height = target.offsetHeight, shade = reveal;
+      settle = setTimeout(() => {
+        target.style.overflow = "hidden"; target.style.opacity = "0"; target.style.height = `${height}px`;
+        if (shade) shade.style.transition = `height 180ms ${EASE}, opacity 180ms linear`;
+        void target.offsetHeight;
+        target.style.transition = `height 180ms ${EASE}, padding 180ms ${EASE}`;
+        target.style.height = "0px"; target.style.paddingBlock = "0px";
+        if (shade) { shade.style.height = "0px"; shade.style.opacity = "0"; }
+        // Still mounted well after the action should have removed it: refused or failed, so restore it.
+        settle = setTimeout(() => { clear(target); if (row === target) row = null; }, 1500);
+      }, slide);
+    } else {
+      const back = Math.round(Math.min(240, Math.max(140, Math.abs(offset) * 1.2)));
+      target.style.transition = `transform ${back}ms ${EASE}`;
+      target.style.transform = "translate3d(0,0,0)";
+      settle = setTimeout(() => { clear(target); if (row === target) row = null; }, back + 20);
+    }
+    if (commit) onSwipe({ id: target.dataset.mailId!, index: Number(target.getAttribute("aria-rowindex")) - 1, direction });
   };
   list.addEventListener("touchstart", start, { passive: true });
   list.addEventListener("touchmove", move, { passive: false });

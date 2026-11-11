@@ -131,7 +131,9 @@
 
   /* Row swipes (touch-gestures.ts): the row slides over a coloured reveal. Left = Done, right = Remind Me. */
   .app .mail-row { touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-  .app .mail-row.swiping { position: relative; z-index: 2; background: var(--bg); will-change: transform; }
+  /* Data attributes, not classes: React rewrites className when a row re-renders mid-gesture. */
+  .app .mail-row[data-swipe] { will-change: transform; }
+  .app .mail-row[data-swipe="active"] { position: relative; z-index: 2; background: var(--bg); }
   .mail-swipe-reveal {
     position: absolute;
     left: 0;
@@ -144,6 +146,8 @@
     font-size: 15px;
     font-weight: 500;
     pointer-events: none;
+    overflow: hidden;
+    white-space: nowrap;
     transition: background-color 120ms linear;
   }
   .mail-swipe-reveal[data-direction="left"] { justify-content: flex-end; background: color-mix(in srgb, #3f9b6b 45%, var(--bg)); }

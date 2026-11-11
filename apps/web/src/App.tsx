@@ -1091,7 +1091,8 @@ export default function App({ applicationUser, onSignOut }: { applicationUser?: 
     else { setHighlight(index); openOverlay("remind", [id]); }
   };
   function highlightPointerRow(event: PointerEvent<HTMLDivElement>) {
-    if (event.type === "pointermove" && event.pointerType === "touch") return;
+    // Touch has no hover or keyboard cursor; highlighting on touch would re-render the list as a swipe starts.
+    if (event.pointerType === "touch") return;
     if (!(event.target instanceof Element)) return;
     const row = event.target.closest<HTMLElement>(".mail-row[data-motion-id]");
     if (!row || row.parentElement !== event.currentTarget) return;
